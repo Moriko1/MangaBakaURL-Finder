@@ -1,17 +1,19 @@
 # MangaBaka URL Finder
 
-Browser extension for matching MangaBaka series to provider URLs and searching MangaBaka from supported provider pages.
+Browser extension for matching MangaBaka series to external provider URLs and searching MangaBaka from supported provider pages.
 
-Not affiliated with the MangaBaka development team.
+**Not affiliated with the MangaBaka development team.**
 
 ## Features
 
-- Reads MangaBaka metadata from the active tab and finds matching provider URLs
+- Reads MangaBaka series metadata from the active tab
+- Finds matching provider URLs for enabled providers
+- Caches lookup results locally
+- Lets you retry or replace bad first-run matches
+- Lets you refresh cached MangaBaka results from the saved provider URL
 - Searches MangaBaka directly from supported provider series and chapter pages
-- Caches MangaBaka lookup results locally to avoid unnecessary repeat searches
-- Shows latest chapter info where the provider exposes it
-- Lets you mark bad provider matches and retry with alternate MangaBaka titles
-- Optionally saves the selected provider URL into the MangaBaka `Read Link` field for library entries
+- Can save a copied provider URL into MangaBaka's `Read Link` field
+- Includes an Info tab with build/version details, install source, cache stats, and reset controls
 
 ## Supported Providers
 
@@ -29,42 +31,64 @@ Disabled in the UI:
 - `Comix`
 
 Notes:
-- `ExHentai` uses the same search logic as `E-Hentai`, but it still depends on the browser already having the required authenticated cookies.
-- `E-Hentai` and `ExHentai` are excluded from the Google and Firefox packaged variants.
+- `E-Hentai` and `ExHentai` depend on browser cookies for authenticated access where required.
+- Google and Firefox packaged variants exclude `E-Hentai` and `ExHentai` from permissions, popup options, packaged assets, and popup logic.
 
-## Popup Behavior
+## Popup Modes
 
-On MangaBaka series pages the popup searches enabled providers for matching source URLs.
+### MangaBaka series page
 
-On enabled provider domains the popup switches into provider mode:
-- only the current provider row is shown
-- `Search MangaBaka` is enabled on supported series or chapter pages
-- `Search MangaBaka` is disabled on other pages from that provider
-- the provider search button follows the `Provider-Link Type` setting
+On `https://mangabaka.org/<id>` pages, the popup runs provider lookups for all enabled providers.
 
-The header also includes a configurable `MangaBaka-Link Button` that can open:
-- `Mangabaka.org`
-- `Mangabaka.org/my/library`
-- `Mangabaka.org/u/profile`
+Provider rows can show:
+- A matched result
+- `Search Now` for newly enabled providers with no cached search yet
+- Retry for exhausted title attempts
+- `Mark Incorrect` for first-run results
+- A refresh icon for cached MangaBaka results
 
-If `Mangabaka.org/u/profile` is selected, the `Profile Name` field is used to build the final URL.
+Cached MangaDex results also support manual purge toggling by clicking the displayed chapter line.
 
-## Tech Stack
+### Provider page
 
-- Manifest V3 extension
-- Plain TypeScript
-- Static HTML and CSS
-- No bundler
-- No frontend framework
+On enabled provider domains, the popup switches to provider mode:
+- Only the current provider row is active
+- `Search MangaBaka` is enabled on supported series/chapter pages
+- `Search MangaBaka` is disabled on unsupported pages for that provider
+- The button uses the configured `Provider-Link Type`
+
+## Options
+
+### Providers tab
+
+- Enable or disable supported providers
+- Choose the provider display mode
+
+### Extension tab
+
+- Set the `MangaBaka-Link Button` target
+- Set the optional MangaBaka profile name
+- Choose `MangaBaka-Link Type`
+- Choose `Provider-Link Type`
+
+### Info tab
+
+- Toggle between version name and build date
+- View install source and developer link
+- Toggle cache stats between series count and byte size from the `Cache Size` row
+- Toggle MangaDex purge ratio between percent and fraction
+- Reset the extension with a 3-click confirmation flow
 
 ## Project Layout
 
 ```text
 manifest.json                Base manifest template
-popup.html                   Base popup markup
+popup.html                   Popup markup
 popup.css                    Popup styles
-src/popup.ts                 Popup state, provider search, provider-page search, cache, read-link save flow
+src/popup.ts                 Popup state, provider search, cache, provider-page mode, read-link save flow
 src/background.ts            Toolbar icon activation logic
+src/build-info.ts            Generated build-date constant
+scripts/update-build-info.mjs Build-date generator
 scripts/build-variant.mjs    Variant build entry point
 scripts/package-variant.mjs  Variant packaging entry point
 scripts/variant-utils.mjs    Shared variant/build helpers
@@ -79,11 +103,10 @@ webstore-package-google/     Google packaged bundle
 webstore-package-firefox/    Firefox packaged bundle
 ```
 
-Generated output folders are intentionally ignored and can be recreated from the scripts below.
-
 ## Scripts
 
 ```bash
+npm install
 npm run clean
 npm run build
 npm run watch
@@ -97,73 +120,41 @@ npm run package:all
 ```
 
 What they do:
-- `npm run clean` removes all generated build and package folders
-- `npm run build` cleans and recompiles the default local `dist/` output
-- `npm run watch` runs TypeScript in watch mode
-- `npm run build:complete` builds the full variant into `dist-complete/`
-- `npm run build:google` builds the store-safe Chromium variant into `dist-google/`
-- `npm run build:firefox` builds the Firefox variant into `dist-firefox/`
-- `npm run package:complete` prepares `webstore-package-complete/`
-- `npm run package:google` prepares `webstore-package-google/`
-- `npm run package:firefox` prepares `webstore-package-firefox/`
-- `npm run package:all` builds and packages all three variants sequentially
+- `npm run clean` removes generated build and package folders.
+- `npm run build` updates build metadata, cleans outputs, and compiles the default local build.
+- `npm run watch` runs TypeScript in watch mode.
+- `npm run build:complete` builds the complete variant.
+- `npm run build:google` builds the Google/store-safe variant.
+- `npm run build:firefox` builds the Firefox variant.
+- `npm run package:complete` prepares `webstore-package-complete/`.
+- `npm run package:google` prepares `webstore-package-google/`.
+- `npm run package:firefox` prepares `webstore-package-firefox/`.
+- `npm run package:all` packages all three variants sequentially.
 
-## Development
+## Loading the Extension
 
-### Install
+### Chromium browsers
 
-```bash
-npm install
-```
+1. Run `npm run build`
+2. Open `chrome://extensions`
+3. Enable `Developer mode`
+4. Click `Load unpacked`
+5. Select the project root
 
-### Local build
+### Firefox
 
-```bash
-npm run build
-```
-
-### Load in Chromium browsers
-
-1. Open `chrome://extensions`
-2. Enable `Developer mode`
-3. Click `Load unpacked`
-4. Select the project root folder
-
-### Load the Firefox variant
-
-1. Run `npm run build:firefox`
+1. Run `npm run package:firefox`
 2. Open `about:debugging#/runtime/this-firefox`
 3. Click `Load Temporary Add-on`
-4. Select `webstore-package-firefox/manifest.json` after running `npm run package:firefox`, or load the root `manifest.json` only if you are testing the default local build layout yourself
+4. Select `webstore-package-firefox/manifest.json`
 
-### Reload after changes
+## Variant Packages
 
-1. Run the relevant build command again
-2. Reload the unpacked extension in the browser
+- `Complete`: full feature set, including `E-Hentai` and `ExHentai`
+- `Google`: excludes `E-Hentai` and `ExHentai`
+- `Firefox`: uses the same `E-Hentai` and `ExHentai` exclusions as Google and appends `version_name` with `(Firefox)`
 
-If the toolbar icon appears stale, remove and reload the unpacked extension once.
-
-## Variant Builds
-
-This project supports three package targets:
-
-- `Complete`
-  Includes all supported providers, including `E-Hentai` and `ExHentai`.
-
-- `Google`
-  Excludes `E-Hentai` and `ExHentai` permissions, popup options, assets, and popup logic for Chrome Web Store distribution.
-
-- `Firefox`
-  Uses the same `E-Hentai` and `ExHentai` exclusions as the Google variant and appends `version_name` with `(Firefox)`.
-
-Packaged manifests use:
-- `1.1.2 (Complete)`
-- `1.1.2 (Google)`
-- `1.1.2 (Firefox)`
-
-## Packaging
-
-Prepare all distributable bundles:
+To prepare distributable folders:
 
 ```bash
 npm run package:all
@@ -177,22 +168,22 @@ webstore-package-google/
 webstore-package-firefox/
 ```
 
-Each package folder contains only runtime files:
-- `manifest.json`
-- `popup.html`
-- `popup.css`
-- `dist/`
-- `assets/`
+## MangaBaka Read Link Save Flow
 
-For store submission, zip the contents of the relevant `webstore-package-*` folder rather than the project root.
+After copying a provider URL on a MangaBaka page, the copy button becomes a save button for that provider result.
 
-## MangaBaka Read Link Save Behavior
+When pressed, the extension:
+- Verifies the current page is a MangaBaka series page.
+- Checks that the series is already in the MangaBaka library.
+- Opens or reuses the series editor.
+- Updates the `Read Link` field with the copied provider URL.
 
-After copying a provider URL, the copy button turns into a save button. Pressing it will:
+If the series is not in the library, the popup reports that requirement instead of writing the link.
 
-- verify the current series is on MangaBaka
-- verify the series is in your MangaBaka library
-- open or reuse the library editor for that series
-- replace the existing `Read Link` with the copied provider URL
+## Privacy
 
-If the series is not in your library, the extension reports that you must add it first.
+See [Privacy Policy.md](/C:/Users/Nick/WebstormProjects/MangaURLExtension/Privacy%20Policy.md) for the current privacy statement.
+
+## License
+
+This repository is licensed under the custom [MIT+LENNOD License](/C:/Users/Nick/WebstormProjects/MangaURLExtension/LICENSE).

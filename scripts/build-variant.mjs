@@ -19,12 +19,19 @@ const tempSrcDir = resolve(variantRoot, "src");
 const tempTsconfigPath = resolve(variantRoot, "tsconfig.json");
 const outDir = resolve(root, getVariantBuildDirectoryName(variant));
 const tscPath = resolve(root, "node_modules", "typescript", "bin", "tsc");
+const updateBuildInfoScriptPath = resolve(root, "scripts", "update-build-info.mjs");
+
+execFileSync(process.execPath, [updateBuildInfoScriptPath], {
+  cwd: root,
+  stdio: "inherit",
+});
 
 cleanPath(variantRoot);
 cleanPath(outDir);
 ensureDir(tempSrcDir);
 
 writeTextFile(resolve(tempSrcDir, "background.ts"), readText(resolve(root, "src", "background.ts")));
+writeTextFile(resolve(tempSrcDir, "build-info.ts"), readText(resolve(root, "src", "build-info.ts")));
 writeTextFile(resolve(tempSrcDir, "chrome.d.ts"), readText(resolve(root, "src", "chrome.d.ts")));
 writeTextFile(
   resolve(tempSrcDir, "popup.ts"),

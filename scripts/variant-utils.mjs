@@ -152,7 +152,21 @@ export function createVariantPopupSource(variant, popupSource) {
 
   next = replaceOrThrow(
     next,
-    /interface EHentaiSearchResult \{[\s\S]*?\n\}\n\n/,
+    /function extractEHentaiBaseTitle\([\s\S]*?\r?\n}\r?\n\r?\n/,
+    "",
+    "extractEHentaiBaseTitle",
+  );
+
+  next = replaceOrThrow(
+    next,
+    /const extractEHentaiBaseTitle = \(value: string\): string => \{[\s\S]*?\r?\n\s*};\r?\n\r?\n/,
+    "",
+    "inline extractEHentaiBaseTitle",
+  );
+
+  next = replaceOrThrow(
+    next,
+    /interface EHentaiSearchResult \{[\s\S]*?\r?\n\}\r?\n\r?\n/,
     "",
     "EHentaiSearchResult",
   );
@@ -224,12 +238,12 @@ const DEFAULT_SETTINGS: ExtensionSettings = {
     "provider constants",
   );
 
-  next = replaceOrThrow(next, /\n\s*wireProviderOption\("ehentai", getEHentaiOptionInput\(\)\);\n\s*wireProviderOption\("exhentai", getExHentaiOptionInput\(\)\);/, "", "EH option wiring");
-  next = replaceOrThrow(next, /\n\s*getEHentaiOptionInput\(\)\.checked = currentSettings\.enabledProviders\.ehentai;\n\s*getExHentaiOptionInput\(\)\.checked = currentSettings\.enabledProviders\.exhentai;/, "", "EH option render");
+  next = next.replace(/\r?\n\s*wireProviderOption\("ehentai", getEHentaiOptionInput\(\)\);\r?\n\s*wireProviderOption\("exhentai", getExHentaiOptionInput\(\)\);/, "");
+  next = next.replace(/\r?\n\s*getEHentaiOptionInput\(\)\.checked = currentSettings\.enabledProviders\.ehentai;\r?\n\s*getExHentaiOptionInput\(\)\.checked = currentSettings\.enabledProviders\.exhentai;/, "");
 
   next = replaceOrThrow(
     next,
-    /async function searchProviders\([\s\S]*?return \{ atsu, mangadex, ehentai, exhentai, comixto, mangafire, weebcentral \};\n\}/,
+    /async function searchProviders\([\s\S]*?\r?\n\}(?=(?:\r?\n){2}async function searchProvider)/,
     `async function searchProviders(
   metadata: MangaBakaMetadata,
   rejectedUrls: RejectedProviderUrls,
@@ -248,7 +262,7 @@ const DEFAULT_SETTINGS: ExtensionSettings = {
 
   next = replaceOrThrow(
     next,
-    /async function searchProvider\([\s\S]*?default:\n\s*return null;\n\s*}\n\}/,
+    /async function searchProvider\([\s\S]*?\r?\n\}(?=(?:\r?\n){2}async function searchAtsumaru)/,
     `async function searchProvider(
   providerKey: ProviderKey,
   metadata: MangaBakaMetadata,
@@ -275,49 +289,49 @@ const DEFAULT_SETTINGS: ExtensionSettings = {
 
   next = replaceOrThrow(
     next,
-    /async function searchEHentai\([\s\S]*?\n}\n\nasync function searchMangaFire/,
+    /async function searchEHentai\([\s\S]*?\r?\n}\r?\n\r?\nasync function searchMangaFire/,
     `async function searchMangaFire`,
     "searchEHentai function",
   );
 
   next = replaceOrThrow(
     next,
-    /function extractEHentaiSearchResults\([\s\S]*?\n}\n\n/,
+    /function extractEHentaiSearchResults\([\s\S]*?\r?\n}\r?\n\r?\n/,
     "",
     "extractEHentaiSearchResults",
   );
 
   next = replaceOrThrow(
     next,
-    /function canonicalizeEHentaiGalleryUrl\([\s\S]*?\n}\n\n/,
+    /function canonicalizeEHentaiGalleryUrl\([\s\S]*?\r?\n}\r?\n\r?\n/,
     "",
     "canonicalizeEHentaiGalleryUrl",
   );
 
   next = replaceOrThrow(
     next,
-    /function cleanEHentaiGalleryTitle\([\s\S]*?\n}\n\n/,
+    /function cleanEHentaiGalleryTitle\([\s\S]*?\r?\n}\r?\n\r?\n/,
     "",
     "cleanEHentaiGalleryTitle",
   );
 
   next = replaceOrThrow(
     next,
-    /function extractEHentaiTitleCandidates\([\s\S]*?\n}\n\n/,
+    /function extractEHentaiTitleCandidates\([\s\S]*?\r?\n}\r?\n\r?\n/,
     "",
     "extractEHentaiTitleCandidates",
   );
 
   next = replaceOrThrow(
     next,
-    /function buildEHentaiQueryTitles\([\s\S]*?\n}\n\n/,
+    /function buildEHentaiQueryTitles\([\s\S]*?\r?\n}\r?\n\r?\n/,
     "",
     "buildEHentaiQueryTitles",
   );
 
   next = replaceOrThrow(
     next,
-    `function getProviderIconPath(providerKey: ProviderKey): string {\n  const filename = providerKey === "exhentai" ? "ehentai" : providerKey;\n  return chrome.runtime.getURL(\`assets/providers/\${filename}.\${PROVIDER_ICON_EXTENSIONS[providerKey]}\`);\n}`,
+    /function getProviderIconPath\(providerKey: ProviderKey\): string \{\r?\n\s*const filename = providerKey === "exhentai" \? "ehentai" : providerKey;\r?\n\s*return chrome\.runtime\.getURL\(`assets\/providers\/\$\{filename}\.\$\{PROVIDER_ICON_EXTENSIONS\[providerKey]}`\);\r?\n}/,
     `function getProviderIconPath(providerKey: ProviderKey): string {\n  return chrome.runtime.getURL(\`assets/providers/\${providerKey}.\${PROVIDER_ICON_EXTENSIONS[providerKey]}\`);\n}`,
     "provider icon path",
   );
@@ -331,7 +345,7 @@ const DEFAULT_SETTINGS: ExtensionSettings = {
 
   next = replaceOrThrow(
     next,
-    /\n\s*if \(parsedUrl\.hostname === "e-hentai\.org"\) \{[\s\S]*?\n\s*if \(parsedUrl\.hostname === "exhentai\.org"\) \{[\s\S]*?\n\s*}\n\s*} catch \{/,
+    /\r?\n\s*if \(parsedUrl\.hostname === "e-hentai\.org"\) \{[\s\S]*?\r?\n\s*if \(parsedUrl\.hostname === "exhentai\.org"\) \{[\s\S]*?\r?\n\s*}\r?\n\s*} catch \{/,
     `
   } catch {`,
     "provider page EH route matching",
@@ -339,28 +353,28 @@ const DEFAULT_SETTINGS: ExtensionSettings = {
 
   next = replaceOrThrow(
     next,
-    /\n\s*case "ehentai":\n\s*case "exhentai":\n\s*return extractEHentaiBaseTitle\(trimmed\);/,
+    /\r?\n\s*case "ehentai":\r?\n\s*case "exhentai":\r?\n\s*return extractEHentaiBaseTitle\(trimmed\);/,
     "",
     "provider candidate EH cleaner",
   );
 
   next = replaceOrThrow(
     next,
-    /\n\s*case "ehentai":\n\s*case "exhentai":\n\s*case "comixto":/,
+    /\r?\n\s*case "ehentai":\r?\n\s*case "exhentai":\r?\n\s*case "comixto":/,
     `\n    case "comixto":`,
     "provider page fetch EH cases",
   );
 
   next = replaceOrThrow(
     next,
-    /\n\s*case "ehentai":\n\s*case "exhentai":\n\s*return extractEHentaiBaseTitle\(trimmed\);/,
+    /\r?\n\s*case "ehentai":\r?\n\s*case "exhentai":\r?\n\s*return extractEHentaiBaseTitle\(trimmed\);/,
     "",
     "global provider title EH cleaner",
   );
 
   next = replaceOrThrow(
     next,
-    /\n\s*case "ehentai":\n\s*case "exhentai": \{\n\s*addSelectorText\(\["#gn", "#gj", "h1"\], prioritizedCandidates\);\n\s*break;\n\s*}/,
+    /\r?\n\s*case "ehentai":\r?\n\s*case "exhentai": \{\r?\n\s*addSelectorText\(\["#gn", "#gj", "h1"\], prioritizedCandidates\);\r?\n\s*break;\r?\n\s*}/,
     "",
     "provider page EH selectors",
   );
