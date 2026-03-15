@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MangaBaka URL Finder</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="popup-shell">
+      <header class="popup-header">
+        <div class="title-block">
+          <p class="eyebrow">MangaBaka Source Companion</p>
+          <h1 id="series-title">Loading...</h1>
+          <p id="series-subtitle" class="subtitle">Preparing popup...</p>
+        </div>
+        <div class="header-actions">
+          <button
+            id="mangabaka-button"
+            class="icon-button icon-button--mangabaka"
+            type="button"
+            title="Open MangaBaka"
+            aria-label="Open MangaBaka"
+            hidden
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="9"></circle>
+              <path d="M3 12h18"></path>
+              <path d="M12 3a14 14 0 0 1 0 18"></path>
+              <path d="M12 3a14 14 0 0 0 0 18"></path>
+            </svg>
+          </button>
+          <button id="options-button" class="icon-button" type="button" title="Options" aria-label="Options">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="3.1"></circle>
+              <path d="M19.4 15a1 1 0 0 0 .2 1.1l.1.1a1.9 1.9 0 1 1-2.7 2.7l-.1-.1a1 1 0 0 0-1.1-.2 1 1 0 0 0-.6.9V20a1.9 1.9 0 1 1-3.8 0v-.2a1 1 0 0 0-.7-.9 1 1 0 0 0-1.1.2l-.1.1a1.9 1.9 0 1 1-2.7-2.7l.1-.1a1 1 0 0 0 .2-1.1 1 1 0 0 0-.9-.6H4a1.9 1.9 0 1 1 0-3.8h.2a1 1 0 0 0 .9-.7 1 1 0 0 0-.2-1.1l-.1-.1a1.9 1.9 0 1 1 2.7-2.7l.1.1a1 1 0 0 0 1.1.2h.1a1 1 0 0 0 .6-.9V4a1.9 1.9 0 1 1 3.8 0v.2a1 1 0 0 0 .7.9 1 1 0 0 0 1.1-.2l.1-.1a1.9 1.9 0 1 1 2.7 2.7l-.1.1a1 1 0 0 0-.2 1.1v.1a1 1 0 0 0 .9.6h.2a1.9 1.9 0 1 1 0 3.8h-.2a1 1 0 0 0-.9.7Z"></path>
+            </svg>
+          </button>
+          <button
+            id="reset-button"
+            class="icon-button icon-button--reset"
+            type="button"
+            title="Reset cached search"
+            aria-label="Reset cached search"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20 12a8 8 0 1 1-2.34-5.66" />
+              <path d="M20 4v6h-6" />
+            </svg>
+          </button>
+          <button
+            id="info-button"
+            class="icon-button icon-button--info"
+            type="button"
+            title="Extension info"
+            aria-label="Extension info"
+            aria-expanded="false"
+            hidden
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="9"></circle>
+              <path d="M12 10v6"></path>
+              <path d="M12 7.25h.01"></path>
+            </svg>
+          </button>
+          <section id="info-popover" class="info-popover" hidden>
+            <p class="info-popover-label">Version Name</p>
+            <p id="info-version" class="info-popover-value">Loading...</p>
+          </section>
+        </div>
+      </header>
+
+      <section id="options-panel" class="options-panel" hidden>
+        <label class="option-row">
+          <span>Atsumaru</span>
+          <input id="option-atsu" type="checkbox" checked />
+        </label>
+        <label class="option-row option-row--disabled">
+          <span>Comix</span>
+          <input id="option-comixto" type="checkbox" disabled />
+        </label>
+        <label class="option-row">
+          <span>MangaDex</span>
+          <input id="option-mangadex" type="checkbox" checked />
+        </label>
+        <label class="option-row">
+          <span>MangaFire</span>
+          <input id="option-mangafire" type="checkbox" />
+        </label>
+        <label class="option-row">
+          <span>WeebCentral</span>
+          <input id="option-weebcentral" type="checkbox" />
+        </label>
+        <label class="option-row">
+          <span>Provider Display</span>
+          <select id="option-provider-label-mode">
+            <option value="titles">Titles</option>
+            <option value="icons">Icons</option>
+            <option value="stacked">Titles + Icons</option>
+          </select>
+        </label>
+        <hr class="option-separator" />
+        <label class="option-row">
+          <span>MangaBaka-Link Button</span>
+          <select id="option-mangabaka-button-target">
+            <option value="root">Mangabaka.org</option>
+            <option value="library">Mangabaka.org/my/library</option>
+            <option value="profile">Mangabaka.org/u/profile</option>
+          </select>
+        </label>
+        <label id="option-mangabaka-profile-row" class="option-row option-row--profile">
+          <span>Profile Name</span>
+          <input id="option-mangabaka-profile-name" type="text" placeholder="Profile Name" spellcheck="false" />
+        </label>
+        <label class="option-row">
+          <span>MangaBaka-Link Type</span>
+          <select id="option-mangabaka-link-type">
+            <option value="current">Current Tab</option>
+            <option value="new">New Tab</option>
+          </select>
+        </label>
+        <label class="option-row">
+          <span>Provider-Link Type</span>
+          <select id="option-provider-link-type">
+            <option value="current">Current Tab</option>
+            <option value="new" selected>New Tab</option>
+          </select>
+        </label>
+        <div class="option-row">
+          <span>Window Max Height</span>
+          <div class="option-number-field">
+            <button
+              id="option-popup-max-height-reset"
+              class="field-reset-button"
+              type="button"
+              title="Reset window max height"
+              aria-label="Reset window max height"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 12a8 8 0 1 1-2.34-5.66"></path>
+                <path d="M20 4v6h-6"></path>
+              </svg>
+            </button>
+            <input
+              id="option-popup-max-height"
+              type="number"
+              min="400"
+              step="1"
+              inputmode="numeric"
+              aria-label="Window max height in pixels"
+            />
+          </div>
+        </div>
+        <hr class="option-separator" />
+        <label class="option-row">
+          <span>E-Hentai</span>
+          <input id="option-ehentai" type="checkbox" />
+        </label>
+        <label class="option-row">
+          <span>ExHentai</span>
+          <input id="option-exhentai" type="checkbox" />
+        </label>
+      </section>
+
+      <section id="results" class="results"></section>
+
+      <section id="confirm-panel" class="confirm-panel" hidden>
+        <p id="confirm-message">Press the same button again to confirm.</p>
+      </section>
+
+      <footer class="status-bar">
+        <p id="status" data-tone="idle">Waiting...</p>
+      </footer>
+    </main>
+
+    <script src="dist/popup.js"></script>
+  </body>
+</html>

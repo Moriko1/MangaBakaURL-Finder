@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "MangaBaka URL Finder",
+  "version": "1.1.2",
+  "description": "Find matching Atsumaru and MangaDex (and more) URLs for MangaBaka.",
+  "permissions": ["storage", "tabs", "scripting"],
+  "host_permissions": [
+    "https://mangabaka.org/*",
+    "https://mangadex.org/*",
+    "https://atsu.moe/*",
+    "https://mangafire.to/*",
+    "https://weebcentral.com/*",
+    "https://api.mangadex.org/*",
+    "https://e-hentai.org/*",
+    "https://exhentai.org/*",
+    "https://search.brave.com/*",
+    "https://search.yahoo.com/*"
+  ],
+  "background": {
+    "service_worker": "dist/background.js"
+  },
+  "icons": {
+    "16": "assets/icon-color-16.png",
+    "32": "assets/icon-color-32.png",
+    "48": "assets/icon-color-48.png",
+    "128": "assets/icon-color-128.png"
+  },
+  "action": {
+    "default_icon": {
+      "16": "assets/icon-gray-16.png",
+      "32": "assets/icon-gray-32.png",
+      "48": "assets/icon-gray-48.png",
+      "128": "assets/icon-gray-128.png"
+    },
+    "default_popup": "popup.html",
+    "default_title": "MangaBaka URL Finder"
+  }
+}
