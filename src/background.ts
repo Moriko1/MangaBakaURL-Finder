@@ -1,15 +1,15 @@
-const ACTIVE_ICON_PATHS = {
-  16: chrome.runtime.getURL("assets/icon-color-16.png"),
-  32: chrome.runtime.getURL("assets/icon-color-32.png"),
-  48: chrome.runtime.getURL("assets/icon-color-48.png"),
-  128: chrome.runtime.getURL("assets/icon-color-128.png"),
+const ACTIVE_ICON_ASSET_PATHS = {
+  16: "assets/icon-color-16.png",
+  32: "assets/icon-color-32.png",
+  48: "assets/icon-color-48.png",
+  128: "assets/icon-color-128.png",
 };
 
-const INACTIVE_ICON_PATHS = {
-  16: chrome.runtime.getURL("assets/icon-gray-16.png"),
-  32: chrome.runtime.getURL("assets/icon-gray-32.png"),
-  48: chrome.runtime.getURL("assets/icon-gray-48.png"),
-  128: chrome.runtime.getURL("assets/icon-gray-128.png"),
+const INACTIVE_ICON_ASSET_PATHS = {
+  16: "assets/icon-gray-16.png",
+  32: "assets/icon-gray-32.png",
+  48: "assets/icon-gray-48.png",
+  128: "assets/icon-gray-128.png",
 };
 
 const BACKGROUND_SETTINGS_KEY = "extension:settings";
@@ -22,6 +22,43 @@ const BACKGROUND_DEFAULT_ENABLED_PROVIDERS = {
   mangafire: false,
   weebcentral: false,
 };
+let activeIconImageDataPromise: Promise<Record<number, ImageData>> | null = null;
+let inactiveIconImageDataPromise: Promise<Record<number, ImageData>> | null = null;
+
+async function loadIconImageData(path: string, size: number): Promise<ImageData> {
+  const response = await fetch(chrome.runtime.getURL(path));
+  if (!response.ok) {
+    throw new Error(`Failed to load icon asset: ${path}`);
+  }
+
+  const bitmap = await createImageBitmap(await response.blob());
+  const canvas = new OffscreenCanvas(size, size);
+  const context = canvas.getContext("2d");
+  if (!context) {
+    throw new Error("Unable to create icon canvas context.");
+  }
+
+  context.clearRect(0, 0, size, size);
+  context.drawImage(bitmap, 0, 0, size, size);
+  return context.getImageData(0, 0, size, size);
+}
+
+async function loadIconSet(assetPaths: Record<number, string>): Promise<Record<number, ImageData>> {
+  const iconEntries = await Promise.all(
+    Object.entries(assetPaths).map(async ([size, path]) => [Number(size), await loadIconImageData(path, Number(size))] as const),
+  );
+  return Object.fromEntries(iconEntries) as Record<number, ImageData>;
+}
+
+function getActionIconImageData(isActive: boolean): Promise<Record<number, ImageData>> {
+  if (isActive) {
+    activeIconImageDataPromise ??= loadIconSet(ACTIVE_ICON_ASSET_PATHS);
+    return activeIconImageDataPromise;
+  }
+
+  inactiveIconImageDataPromise ??= loadIconSet(INACTIVE_ICON_ASSET_PATHS);
+  return inactiveIconImageDataPromise;
+}
 
 function isMangabakaUrl(url?: string): boolean {
   if (!url) {
@@ -85,7 +122,7 @@ async function updateActionForTab(tabId: number, url?: string): Promise<void> {
   try {
     await chrome.action.setIcon({
       tabId,
-      path: isActive ? ACTIVE_ICON_PATHS : INACTIVE_ICON_PATHS,
+      imageData: await getActionIconImageData(isActive),
     });
 
     await chrome.action.setTitle({

@@ -1,3 +1,18 @@
+/dist
+/dist-complete
+/dist-firefox
+/dist-google
+/variant-build
+/webstore-package-complete
+/webstore-package-firefox
+/webstore-package-google
+/.DS_Store
+/.idea
+/edge-*-dom.html
+/temp-*.html
+/temp-*.js
+/temp-*.css
+/tmp_*.txt
 /tmp
 /out-tsc
 
