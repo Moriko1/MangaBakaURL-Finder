@@ -107,7 +107,7 @@ interface ExtensionSettings {
   providerLabelMode: "titles" | "icons" | "stacked";
   mangaBakaLinkType: LinkTargetType;
   providerLinkType: LinkTargetType;
-  popupMaxHeightPx: number;
+  optionsPanelTab: OptionsPanelTab;
   mangaBakaButtonTarget: MangaBakaButtonTarget;
   mangaBakaProfileName: string;
 }
@@ -115,6 +115,7 @@ interface ExtensionSettings {
 type ProviderKey = keyof LookupResults;
 type ProviderLabelMode = ExtensionSettings["providerLabelMode"];
 type LinkTargetType = "current" | "new";
+type OptionsPanelTab = "providers" | "extension" | "info";
 type MangaBakaButtonTarget = "root" | "library" | "profile";
 type StatusTone = "idle" | "loading" | "success" | "error";
 type PopupViewState = "unsupported" | "invalid" | "loading" | "lookup" | "provider" | "error";
@@ -180,8 +181,7 @@ const DEFAULT_ENABLED_PROVIDERS: Record<ProviderKey, boolean> = {
 const DEFAULT_PROVIDER_LABEL_MODE: ProviderLabelMode = "titles";
 const DEFAULT_MANGABAKA_LINK_TARGET_TYPE: LinkTargetType = "current";
 const DEFAULT_PROVIDER_LINK_TARGET_TYPE: LinkTargetType = "new";
-const MIN_POPUP_MAX_HEIGHT_PX = 400;
-const DEFAULT_POPUP_MAX_HEIGHT_PX = 700;
+const DEFAULT_OPTIONS_PANEL_TAB: OptionsPanelTab = "providers";
 const DEFAULT_MANGABAKA_BUTTON_TARGET: MangaBakaButtonTarget = "root";
 const EMPTY_LOOKUP_RESULTS: LookupResults = {
   atsu: null,
@@ -215,7 +215,7 @@ const DEFAULT_SETTINGS: ExtensionSettings = {
   providerLabelMode: DEFAULT_PROVIDER_LABEL_MODE,
   mangaBakaLinkType: DEFAULT_MANGABAKA_LINK_TARGET_TYPE,
   providerLinkType: DEFAULT_PROVIDER_LINK_TARGET_TYPE,
-  popupMaxHeightPx: DEFAULT_POPUP_MAX_HEIGHT_PX,
+  optionsPanelTab: DEFAULT_OPTIONS_PANEL_TAB,
   mangaBakaButtonTarget: DEFAULT_MANGABAKA_BUTTON_TARGET,
   mangaBakaProfileName: "",
 };
@@ -317,8 +317,6 @@ async function initializePopup(): Promise<void> {
   setStatus("Checking the current tab...", "idle");
   currentInactiveTitleMarkup = await getAlternatingInactiveTitleMarkup();
   currentSettings = await loadSettings();
-  applyPopupMaxHeight(currentSettings.popupMaxHeightPx);
-  renderHeaderAccessoryState();
   getInfoVersionNode().textContent = EXTENSION_VERSION_NAME;
   wireOptionsControls();
   renderOptionsPanel();
@@ -414,7 +412,7 @@ async function loadSettings(): Promise<ExtensionSettings> {
   const providerLabelMode = settings?.providerLabelMode;
   const mangaBakaLinkType = normalizeLinkTargetType(settings?.mangaBakaLinkType, DEFAULT_MANGABAKA_LINK_TARGET_TYPE);
   const providerLinkType = normalizeLinkTargetType(settings?.providerLinkType, DEFAULT_PROVIDER_LINK_TARGET_TYPE);
-  const popupMaxHeightPx = normalizePopupMaxHeight(settings?.popupMaxHeightPx);
+  const optionsPanelTab = normalizeOptionsPanelTab(settings?.optionsPanelTab);
   const mangaBakaButtonTarget = normalizeMangaBakaButtonTarget(settings?.mangaBakaButtonTarget);
 
   return {
@@ -428,7 +426,7 @@ async function loadSettings(): Promise<ExtensionSettings> {
       : DEFAULT_PROVIDER_LABEL_MODE,
     mangaBakaLinkType,
     providerLinkType,
-    popupMaxHeightPx,
+    optionsPanelTab,
     mangaBakaButtonTarget,
     mangaBakaProfileName: typeof settings?.mangaBakaProfileName === "string" ? settings.mangaBakaProfileName : "",
   };
@@ -447,27 +445,15 @@ function wireOptionsControls(): void {
     setOptionsPanelOpen(!isOptionsPanelOpen());
   };
 
-  getInfoButton().onclick = (event) => {
-    event.stopPropagation();
-    setInfoPopoverOpen(getInfoPopover().hidden);
+  getProvidersTabButton().onclick = () => {
+    void updateOptionsPanelTab("providers");
   };
-
-  document.addEventListener("click", (event) => {
-    if (!isOptionsPanelOpen() || getInfoPopover().hidden) {
-      return;
-    }
-
-    const target = event.target;
-    if (!(target instanceof Node)) {
-      return;
-    }
-
-    if (getInfoButton().contains(target) || getInfoPopover().contains(target)) {
-      return;
-    }
-
-    setInfoPopoverOpen(false);
-  });
+  getExtensionTabButton().onclick = () => {
+    void updateOptionsPanelTab("extension");
+  };
+  getInfoTabButton().onclick = () => {
+    void updateOptionsPanelTab("info");
+  };
 
   const wireProviderOption = (providerKey: ProviderKey, input: HTMLInputElement): void => {
     input.onchange = () => {
@@ -510,51 +496,6 @@ function wireOptionsControls(): void {
     });
   };
 
-  const commitPopupMaxHeight = (): void => {
-    const normalizedValue = normalizePopupMaxHeight(getPopupMaxHeightInput().value);
-    getPopupMaxHeightInput().value = String(normalizedValue);
-    if (normalizedValue === currentSettings.popupMaxHeightPx) {
-      applyPopupMaxHeight(normalizedValue);
-      renderPopupMaxHeightControls();
-      return;
-    }
-
-    void updateSettings({
-      ...currentSettings,
-      popupMaxHeightPx: normalizedValue,
-    });
-  };
-
-  getPopupMaxHeightInput().oninput = () => {
-    const rawValue = getPopupMaxHeightInput().value.trim();
-    if (!rawValue) {
-      return;
-    }
-
-    const parsedValue = Number.parseInt(rawValue, 10);
-    if (!Number.isFinite(parsedValue)) {
-      return;
-    }
-
-    if (parsedValue < MIN_POPUP_MAX_HEIGHT_PX && rawValue.length >= String(MIN_POPUP_MAX_HEIGHT_PX).length) {
-      commitPopupMaxHeight();
-      return;
-    }
-
-    if (parsedValue >= MIN_POPUP_MAX_HEIGHT_PX && parsedValue !== currentSettings.popupMaxHeightPx) {
-      void updateSettings({
-        ...currentSettings,
-        popupMaxHeightPx: normalizePopupMaxHeight(parsedValue),
-      });
-    }
-  };
-  getPopupMaxHeightInput().onchange = commitPopupMaxHeight;
-  getPopupMaxHeightInput().onblur = commitPopupMaxHeight;
-  getPopupMaxHeightResetButton().onclick = () => {
-    getPopupMaxHeightInput().value = String(DEFAULT_POPUP_MAX_HEIGHT_PX);
-    commitPopupMaxHeight();
-  };
-
   getMangaBakaButtonTargetSelect().onchange = () => {
     void updateSettings({
       ...currentSettings,
@@ -573,7 +514,6 @@ function wireOptionsControls(): void {
 }
 
 function renderOptionsPanel(): void {
-  applyPopupMaxHeight(currentSettings.popupMaxHeightPx);
   getAtsuOptionInput().checked = currentSettings.enabledProviders.atsu;
   getMangaDexOptionInput().checked = currentSettings.enabledProviders.mangadex;
   getComixToOptionInput().checked = false;
@@ -584,9 +524,10 @@ function renderOptionsPanel(): void {
   getProviderLabelModeSelect().value = currentSettings.providerLabelMode;
   getMangaBakaLinkTypeSelect().value = currentSettings.mangaBakaLinkType;
   getProviderLinkTypeSelect().value = currentSettings.providerLinkType;
-  renderPopupMaxHeightControls();
   getMangaBakaButtonTargetSelect().value = currentSettings.mangaBakaButtonTarget;
   getMangaBakaProfileNameInput().value = currentSettings.mangaBakaProfileName;
+  getInfoVersionNode().textContent = EXTENSION_VERSION_NAME;
+  renderOptionsPanelTabs();
   renderMangaBakaNavigationControls();
 }
 
@@ -619,17 +560,33 @@ async function updateSettings(settings: ExtensionSettings): Promise<void> {
   await rerenderCurrentView();
 }
 
+async function updateOptionsPanelTab(optionsPanelTab: OptionsPanelTab): Promise<void> {
+  if (currentSettings.optionsPanelTab === optionsPanelTab) {
+    renderOptionsPanelTabs();
+    return;
+  }
+
+  currentSettings = {
+    ...currentSettings,
+    optionsPanelTab,
+  };
+  renderOptionsPanelTabs();
+  await saveSettings(currentSettings);
+}
+
 function normalizeLinkTargetType(value: string | undefined, fallback: LinkTargetType = DEFAULT_MANGABAKA_LINK_TARGET_TYPE): LinkTargetType {
   return value === "new" || value === "current" ? value : fallback;
 }
 
-function normalizePopupMaxHeight(value: number | string | undefined): number {
-  const parsedValue = typeof value === "number" ? value : Number.parseInt(value ?? "", 10);
-  if (!Number.isFinite(parsedValue)) {
-    return DEFAULT_POPUP_MAX_HEIGHT_PX;
+function normalizeOptionsPanelTab(value: string | undefined): OptionsPanelTab {
+  switch (value) {
+    case "providers":
+    case "extension":
+    case "info":
+      return value;
+    default:
+      return DEFAULT_OPTIONS_PANEL_TAB;
   }
-
-  return Math.max(MIN_POPUP_MAX_HEIGHT_PX, Math.round(parsedValue));
 }
 
 function normalizeMangaBakaButtonTarget(value: string | undefined): MangaBakaButtonTarget {
@@ -643,17 +600,20 @@ function normalizeMangaBakaButtonTarget(value: string | undefined): MangaBakaBut
   }
 }
 
-function applyPopupMaxHeight(maxHeightPx: number): void {
-  document.documentElement.style.setProperty("--popup-max-height", `${normalizePopupMaxHeight(maxHeightPx)}px`);
-}
+function renderOptionsPanelTabs(): void {
+  const activeTab = currentSettings.optionsPanelTab;
 
-function renderPopupMaxHeightControls(): void {
-  const input = getPopupMaxHeightInput();
-  const resetButton = getPopupMaxHeightResetButton();
-  input.min = String(MIN_POPUP_MAX_HEIGHT_PX);
-  input.step = "1";
-  input.value = String(currentSettings.popupMaxHeightPx);
-  resetButton.disabled = currentSettings.popupMaxHeightPx === DEFAULT_POPUP_MAX_HEIGHT_PX;
+  getProvidersTabButton().setAttribute("aria-selected", activeTab === "providers" ? "true" : "false");
+  getProvidersTabButton().tabIndex = activeTab === "providers" ? 0 : -1;
+  getProvidersTabPanel().hidden = activeTab !== "providers";
+
+  getExtensionTabButton().setAttribute("aria-selected", activeTab === "extension" ? "true" : "false");
+  getExtensionTabButton().tabIndex = activeTab === "extension" ? 0 : -1;
+  getExtensionTabPanel().hidden = activeTab !== "extension";
+
+  getInfoTabButton().setAttribute("aria-selected", activeTab === "info" ? "true" : "false");
+  getInfoTabButton().tabIndex = activeTab === "info" ? 0 : -1;
+  getInfoTabPanel().hidden = activeTab !== "info";
 }
 
 function isOptionsPanelOpen(): boolean {
@@ -663,28 +623,11 @@ function isOptionsPanelOpen(): boolean {
 function setOptionsPanelOpen(isOpen: boolean): void {
   const panel = getOptionsPanel();
   panel.dataset.open = isOpen ? "true" : "false";
-  panel.hidden = false;
+  panel.hidden = !isOpen;
   if (isOpen) {
     clearPendingConfirmation();
   }
-  renderHeaderAccessoryState();
-}
-
-function setInfoPopoverOpen(isOpen: boolean): void {
-  const infoPopover = getInfoPopover();
-  const infoButton = getInfoButton();
-  infoPopover.hidden = !isOpen;
-  infoButton.setAttribute("aria-expanded", isOpen ? "true" : "false");
-}
-
-function renderHeaderAccessoryState(): void {
-  const optionsOpen = isOptionsPanelOpen();
-  getResetButton().hidden = optionsOpen;
-  getInfoButton().hidden = !optionsOpen;
-  getOptionsButton().setAttribute("aria-expanded", optionsOpen ? "true" : "false");
-  if (!optionsOpen) {
-    setInfoPopoverOpen(false);
-  }
+  getOptionsButton().setAttribute("aria-expanded", isOpen ? "true" : "false");
 }
 
 function renderMangaBakaNavigationControls(): void {
@@ -4225,12 +4168,28 @@ function getOptionsButton(): HTMLButtonElement {
   return document.getElementById("options-button") as HTMLButtonElement;
 }
 
-function getInfoButton(): HTMLButtonElement {
-  return document.getElementById("info-button") as HTMLButtonElement;
+function getProvidersTabButton(): HTMLButtonElement {
+  return document.getElementById("options-tab-providers") as HTMLButtonElement;
 }
 
-function getInfoPopover(): HTMLElement {
-  return document.getElementById("info-popover") as HTMLElement;
+function getExtensionTabButton(): HTMLButtonElement {
+  return document.getElementById("options-tab-extension") as HTMLButtonElement;
+}
+
+function getInfoTabButton(): HTMLButtonElement {
+  return document.getElementById("options-tab-info") as HTMLButtonElement;
+}
+
+function getProvidersTabPanel(): HTMLElement {
+  return document.getElementById("options-panel-providers") as HTMLElement;
+}
+
+function getExtensionTabPanel(): HTMLElement {
+  return document.getElementById("options-panel-extension") as HTMLElement;
+}
+
+function getInfoTabPanel(): HTMLElement {
+  return document.getElementById("options-panel-info") as HTMLElement;
 }
 
 function getInfoVersionNode(): HTMLElement {
@@ -4283,14 +4242,6 @@ function getMangaBakaLinkTypeSelect(): HTMLSelectElement {
 
 function getProviderLinkTypeSelect(): HTMLSelectElement {
   return document.getElementById("option-provider-link-type") as HTMLSelectElement;
-}
-
-function getPopupMaxHeightInput(): HTMLInputElement {
-  return document.getElementById("option-popup-max-height") as HTMLInputElement;
-}
-
-function getPopupMaxHeightResetButton(): HTMLButtonElement {
-  return document.getElementById("option-popup-max-height-reset") as HTMLButtonElement;
 }
 
 function getMangaBakaButtonTargetSelect(): HTMLSelectElement {

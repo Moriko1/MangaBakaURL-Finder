@@ -1,10 +1,19 @@
 {
-  "name": "${PROJECT_NAME}",
-  "version": "1.0.0",
-  "description": "",
-  "main": "dist/index.js",
+  "name": "mangabaka-url-finder",
+  "version": "1.1.2",
+  "description": "Find matching provider URLs for MangaBaka and search MangaBaka from supported provider pages.",
+  "main": "dist/background.js",
   "scripts": {
-    "build": "tsc"
+    "clean": "node scripts/clean.mjs",
+    "build": "npm run clean && tsc",
+    "watch": "tsc --watch",
+    "build:complete": "node scripts/build-variant.mjs complete",
+    "build:google": "node scripts/build-variant.mjs google",
+    "build:firefox": "node scripts/build-variant.mjs firefox",
+    "package:complete": "node scripts/package-variant.mjs complete",
+    "package:google": "node scripts/package-variant.mjs google",
+    "package:firefox": "node scripts/package-variant.mjs firefox",
+    "package:all": "npm run package:complete && npm run package:google && npm run package:firefox"
   },
   "dependencies": {},
   "devDependencies": {

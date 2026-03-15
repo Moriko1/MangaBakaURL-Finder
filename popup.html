@@ -48,118 +48,89 @@
               <path d="M20 4v6h-6" />
             </svg>
           </button>
-          <button
-            id="info-button"
-            class="icon-button icon-button--info"
-            type="button"
-            title="Extension info"
-            aria-label="Extension info"
-            aria-expanded="false"
-            hidden
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <circle cx="12" cy="12" r="9"></circle>
-              <path d="M12 10v6"></path>
-              <path d="M12 7.25h.01"></path>
-            </svg>
-          </button>
-          <section id="info-popover" class="info-popover" hidden>
-            <p class="info-popover-label">Version Name</p>
-            <p id="info-version" class="info-popover-value">Loading...</p>
-          </section>
         </div>
       </header>
 
       <section id="options-panel" class="options-panel" hidden>
-        <label class="option-row">
-          <span>Atsumaru</span>
-          <input id="option-atsu" type="checkbox" checked />
-        </label>
-        <label class="option-row option-row--disabled">
-          <span>Comix</span>
-          <input id="option-comixto" type="checkbox" disabled />
-        </label>
-        <label class="option-row">
-          <span>MangaDex</span>
-          <input id="option-mangadex" type="checkbox" checked />
-        </label>
-        <label class="option-row">
-          <span>MangaFire</span>
-          <input id="option-mangafire" type="checkbox" />
-        </label>
-        <label class="option-row">
-          <span>WeebCentral</span>
-          <input id="option-weebcentral" type="checkbox" />
-        </label>
-        <label class="option-row">
-          <span>Provider Display</span>
-          <select id="option-provider-label-mode">
-            <option value="titles">Titles</option>
-            <option value="icons">Icons</option>
-            <option value="stacked">Titles + Icons</option>
-          </select>
-        </label>
-        <hr class="option-separator" />
-        <label class="option-row">
-          <span>MangaBaka-Link Button</span>
-          <select id="option-mangabaka-button-target">
-            <option value="root">Mangabaka.org</option>
-            <option value="library">Mangabaka.org/my/library</option>
-            <option value="profile">Mangabaka.org/u/profile</option>
-          </select>
-        </label>
-        <label id="option-mangabaka-profile-row" class="option-row option-row--profile">
-          <span>Profile Name</span>
-          <input id="option-mangabaka-profile-name" type="text" placeholder="Profile Name" spellcheck="false" />
-        </label>
-        <label class="option-row">
-          <span>MangaBaka-Link Type</span>
-          <select id="option-mangabaka-link-type">
-            <option value="current">Current Tab</option>
-            <option value="new">New Tab</option>
-          </select>
-        </label>
-        <label class="option-row">
-          <span>Provider-Link Type</span>
-          <select id="option-provider-link-type">
-            <option value="current">Current Tab</option>
-            <option value="new" selected>New Tab</option>
-          </select>
-        </label>
-        <div class="option-row">
-          <span>Window Max Height</span>
-          <div class="option-number-field">
-            <button
-              id="option-popup-max-height-reset"
-              class="field-reset-button"
-              type="button"
-              title="Reset window max height"
-              aria-label="Reset window max height"
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M20 12a8 8 0 1 1-2.34-5.66"></path>
-                <path d="M20 4v6h-6"></path>
-              </svg>
-            </button>
-            <input
-              id="option-popup-max-height"
-              type="number"
-              min="400"
-              step="1"
-              inputmode="numeric"
-              aria-label="Window max height in pixels"
-            />
-          </div>
+        <div class="options-tabs" role="tablist" aria-label="Options sections">
+          <button id="options-tab-providers" class="options-tab" type="button" role="tab" aria-selected="true">Providers</button>
+          <button id="options-tab-extension" class="options-tab" type="button" role="tab" aria-selected="false">Extension</button>
+          <button id="options-tab-info" class="options-tab" type="button" role="tab" aria-selected="false">Info</button>
         </div>
-        <hr class="option-separator" />
-        <label class="option-row">
-          <span>E-Hentai</span>
-          <input id="option-ehentai" type="checkbox" />
-        </label>
-        <label class="option-row">
-          <span>ExHentai</span>
-          <input id="option-exhentai" type="checkbox" />
-        </label>
+
+        <section id="options-panel-providers" class="options-tab-panel" role="tabpanel">
+          <label class="option-row">
+            <span>Atsumaru</span>
+            <input id="option-atsu" type="checkbox" checked />
+          </label>
+          <label class="option-row option-row--disabled">
+            <span>Comix</span>
+            <input id="option-comixto" type="checkbox" disabled />
+          </label>
+          <label class="option-row">
+            <span>MangaDex</span>
+            <input id="option-mangadex" type="checkbox" checked />
+          </label>
+          <label class="option-row">
+            <span>MangaFire</span>
+            <input id="option-mangafire" type="checkbox" />
+          </label>
+          <label class="option-row">
+            <span>WeebCentral</span>
+            <input id="option-weebcentral" type="checkbox" />
+          </label>
+          <label class="option-row">
+            <span>Provider Display</span>
+            <select id="option-provider-label-mode">
+              <option value="titles">Titles</option>
+              <option value="icons">Icons</option>
+              <option value="stacked">Titles + Icons</option>
+            </select>
+          </label>
+          <hr class="option-separator" />
+          <label class="option-row">
+            <span>E-Hentai</span>
+            <input id="option-ehentai" type="checkbox" />
+          </label>
+          <label class="option-row">
+            <span>ExHentai</span>
+            <input id="option-exhentai" type="checkbox" />
+          </label>
+        </section>
+
+        <section id="options-panel-extension" class="options-tab-panel" role="tabpanel" hidden>
+          <label class="option-row">
+            <span>MangaBaka-Link Button</span>
+            <select id="option-mangabaka-button-target">
+              <option value="root">Mangabaka.org</option>
+              <option value="library">Mangabaka.org/my/library</option>
+              <option value="profile">Mangabaka.org/u/profile</option>
+            </select>
+          </label>
+          <label id="option-mangabaka-profile-row" class="option-row option-row--profile">
+            <span>Profile Name</span>
+            <input id="option-mangabaka-profile-name" type="text" placeholder="Profile Name" spellcheck="false" />
+          </label>
+          <label class="option-row">
+            <span>MangaBaka-Link Type</span>
+            <select id="option-mangabaka-link-type">
+              <option value="current">Current Tab</option>
+              <option value="new">New Tab</option>
+            </select>
+          </label>
+          <label class="option-row">
+            <span>Provider-Link Type</span>
+            <select id="option-provider-link-type">
+              <option value="current">Current Tab</option>
+              <option value="new" selected>New Tab</option>
+            </select>
+          </label>
+        </section>
+
+        <section id="options-panel-info" class="options-tab-panel options-tab-panel--info" role="tabpanel" hidden>
+          <p class="info-panel-label">Version Name</p>
+          <p id="info-version" class="info-panel-value">Loading...</p>
+        </section>
       </section>
 
       <section id="results" class="results"></section>

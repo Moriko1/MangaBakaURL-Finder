@@ -189,8 +189,7 @@ const DEFAULT_ENABLED_PROVIDERS: Record<ProviderKey, boolean> = {
 const DEFAULT_PROVIDER_LABEL_MODE: ProviderLabelMode = "titles";
 const DEFAULT_MANGABAKA_LINK_TARGET_TYPE: LinkTargetType = "current";
 const DEFAULT_PROVIDER_LINK_TARGET_TYPE: LinkTargetType = "new";
-const MIN_POPUP_MAX_HEIGHT_PX = 400;
-const DEFAULT_POPUP_MAX_HEIGHT_PX = 700;
+const DEFAULT_OPTIONS_PANEL_TAB: OptionsPanelTab = "providers";
 const DEFAULT_MANGABAKA_BUTTON_TARGET: MangaBakaButtonTarget = "root";
 const EMPTY_LOOKUP_RESULTS: LookupResults = {
   atsu: null,
@@ -218,7 +217,7 @@ const DEFAULT_SETTINGS: ExtensionSettings = {
   providerLabelMode: DEFAULT_PROVIDER_LABEL_MODE,
   mangaBakaLinkType: DEFAULT_MANGABAKA_LINK_TARGET_TYPE,
   providerLinkType: DEFAULT_PROVIDER_LINK_TARGET_TYPE,
-  popupMaxHeightPx: DEFAULT_POPUP_MAX_HEIGHT_PX,
+  optionsPanelTab: DEFAULT_OPTIONS_PANEL_TAB,
   mangaBakaButtonTarget: DEFAULT_MANGABAKA_BUTTON_TARGET,
   mangaBakaProfileName: "",
 };`,
