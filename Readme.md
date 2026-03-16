@@ -2,11 +2,11 @@
 
 Browser extension for matching MangaBaka series to provider URLs and searching MangaBaka from supported provider pages.
 
-**Not affiliated with the MangaBaka development team**
-
 Google: Link TBD
 
 Firefox: Link TBD
+
+**Not affiliated with the MangaBaka development team**
 
 ## Overview
 
@@ -66,8 +66,8 @@ Notes:
 ## Version Differences
 
 - `Complete`: Full feature set
-- `Google`: Excludes `E-Hentai` and `ExHentai`
-- `Firefox`: Excludes `E-Hentai` and `ExHentai`
+- `Google`: Excludes 18+ providers
+- `Firefox`: Excludes 18+ providers
 
 ### Chromium Browsers
 

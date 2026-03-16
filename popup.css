@@ -1,3 +1,4 @@
+/* noinspection CssUnresolvedCustomProperty */
 :root {
   color-scheme: dark;
   --bg: #111111;
@@ -7,6 +8,7 @@
   --muted: #b9b1a4;
   --accent: #f0a54a;
   --accent-strong: #ffbe6b;
+  --read-link: rgb(52, 170, 228);
   --danger: #d84f4f;
   --danger-strong: #f06b6b;
   --border: rgba(255, 255, 255, 0.08);
@@ -199,6 +201,13 @@ h1.title--inactive {
 
 .info-panel-row--button {
   gap: 0;
+}
+
+.info-install-source-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
 }
 
 .option-row {
@@ -505,7 +514,7 @@ h1.title--inactive {
 
 /*noinspection CssUnusedSymbol*/
 .icon-button--save-read-link {
-  color: rgb(52, 170, 228);
+  color: var(--read-link);
   border-color: rgba(52, 170, 228, 0.52);
   background: rgba(52, 170, 228, 0.16);
 }
@@ -545,6 +554,18 @@ h1.title--inactive {
 
 .info-panel-link {
   text-decoration: none;
+}
+
+.info-panel-link--status {
+  margin-top: 0;
+}
+
+.info-panel-link--status[data-update-status="available"] {
+  color: var(--read-link);
+}
+
+.info-panel-link--status[data-update-status="available"]:hover {
+  color: var(--read-link);
 }
 
 .info-panel-link:hover {

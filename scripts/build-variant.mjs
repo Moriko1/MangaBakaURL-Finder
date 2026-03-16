@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
+import process, { argv, execPath } from "node:process";
 import {
   assertVariant,
   cleanPath,
@@ -10,7 +11,7 @@ import {
   writeTextFile,
 } from "./variant-utils.mjs";
 
-const variant = process.argv[2] ?? "complete";
+const variant = argv[2] ?? "complete";
 assertVariant(variant);
 
 const root = process.cwd();
@@ -21,7 +22,7 @@ const outDir = resolve(root, getVariantBuildDirectoryName(variant));
 const tscPath = resolve(root, "node_modules", "typescript", "bin", "tsc");
 const updateBuildInfoScriptPath = resolve(root, "scripts", "update-build-info.mjs");
 
-execFileSync(process.execPath, [updateBuildInfoScriptPath], {
+execFileSync(execPath, [updateBuildInfoScriptPath], {
   cwd: root,
   stdio: "inherit",
 });
@@ -59,7 +60,7 @@ writeTextFile(
   ),
 );
 
-execFileSync(process.execPath, [tscPath, "-p", tempTsconfigPath], {
+execFileSync(execPath, [tscPath, "-p", tempTsconfigPath], {
   cwd: root,
   stdio: "inherit",
 });
