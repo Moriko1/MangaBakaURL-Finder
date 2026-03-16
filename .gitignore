@@ -28,6 +28,7 @@
 /tmp_*.txt
 /tmp
 /out-tsc
+/src/build-info.ts
 
 /node_modules
 npm-debug.log*
