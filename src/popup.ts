@@ -1,3 +1,4 @@
+// noinspection JSUnusedGlobalSymbols
 interface MangaBakaMetadata {
   seriesId: string;
   sourceUrl: string;
@@ -13,6 +14,8 @@ interface ProviderMatch {
   latestChapterNumber: string | null;
   latestChapterLanguage: "en" | null;
   manualPurgedChapterNumber?: string | null;
+  mangaDexChapterState?: StoredMangaDexChapterState | null;
+  manualMangaDexChapterState?: "no_chapters_tld" | null;
 }
 
 interface LookupResults {
@@ -36,7 +39,7 @@ interface RejectedProviderUrls {
 }
 
 interface CachedLookup {
-  version: 9;
+  version: 10;
   seriesId: string;
   sourceUrl: string;
   primaryTitle: string;
@@ -92,7 +95,7 @@ interface ExtractedMetadataPayload {
   authors: string[];
 }
 
-interface BraveSearchResult {
+interface SearchResultEntry {
   url: string;
   title: string;
   cite: string;
@@ -118,6 +121,8 @@ type ProviderLabelMode = ExtensionSettings["providerLabelMode"];
 type LinkTargetType = "current" | "new";
 type OptionsPanelTab = "providers" | "extension" | "info";
 type MangaBakaButtonTarget = "root" | "library" | "profile";
+type MangaDexChapterState = "available" | "purged" | "no_chapters_tld";
+type StoredMangaDexChapterState = Exclude<MangaDexChapterState, "available">;
 type MangaDexStatusIconKey = "slight-smile" | "melting-face" | "clown-face" | "pensive";
 type StatusTone = "idle" | "loading" | "success" | "error";
 type PopupViewState = "unsupported" | "invalid" | "loading" | "lookup" | "provider" | "error";
@@ -141,9 +146,21 @@ interface PendingConfirmation {
   timeoutId: number;
 }
 
+type InstallSourceKind = "local" | "google" | "firefox";
+
 interface InstallSourceInfo {
+  kind: InstallSourceKind;
   label: string;
   url: string | null;
+}
+
+interface ReleaseUpdateInfo {
+  checkedAt: string;
+  currentVersion: string;
+  latestVersion: string | null;
+  latestTagName: string | null;
+  latestReleaseUrl: string;
+  status: "up_to_date" | "update_available";
 }
 
 interface MangaDexPurgeStats {
@@ -163,9 +180,10 @@ class InvalidMangaBakaPageError extends Error {
   }
 }
 
-const CACHE_VERSION = 9;
+const CACHE_VERSION = 10;
 const SETTINGS_KEY = "extension:settings";
-const LOCAL_INSTALL_SOURCE_URL = "https://github.com/Moriko1/MangaBakaURL-Finder";
+const POPUP_RELEASE_UPDATE_STORAGE_KEY = "extension:release-update";
+const LOCAL_INSTALL_SOURCE_URL = "https://github.com/Moriko1/MangaBakaURL-Finder/releases/latest";
 const PROVIDER_KEYS: ProviderKey[] = ["atsu", "mangadex", "ehentai", "exhentai", "comixto", "mangafire", "weebcentral"];
 const PROVIDERS: Array<{ key: ProviderKey; label: ProviderMatch["provider"] }> = [
   { key: "atsu", label: "Atsumaru" },
@@ -380,22 +398,41 @@ let currentCacheSeriesStatFormat: "count" | "size" = "count";
 let currentMangaDexPurgeStats: MangaDexPurgeStats = { purgedCount: 0, totalCount: 0 };
 let currentMangaDexPurgeStatFormat: "percent" | "fraction" = "percent";
 let currentVersionInfoMode: "version" | "releaseDate" = "version";
+let currentReleaseUpdateInfo: ReleaseUpdateInfo | null = null;
+let hasLoadedInfoPanelStats = false;
+let infoPanelStatsRefreshPromise: Promise<void> | null = null;
 const RETRY_COOLDOWN_SECONDS = 2;
 
 document.addEventListener("DOMContentLoaded", () => {
   void initializePopup();
 });
 
+// noinspection JSDeprecatedSymbols
+chrome.storage.onChanged.addListener((changes: Record<string, { newValue?: unknown }>, areaName: string) => {
+  if (areaName !== "local" || !(POPUP_RELEASE_UPDATE_STORAGE_KEY in changes)) {
+    return;
+  }
+
+  const nextReleaseUpdateInfo = changes[POPUP_RELEASE_UPDATE_STORAGE_KEY]?.newValue;
+  currentReleaseUpdateInfo = isReleaseUpdateInfo(nextReleaseUpdateInfo)
+    ? nextReleaseUpdateInfo
+    : null;
+  renderInfoPanel();
+});
+
 async function initializePopup(): Promise<void> {
   setResetEnabled(false);
   setStatus("Checking the current tab...", "idle");
-  currentInactiveTitleMarkup = await getAlternatingInactiveTitleMarkup();
-  currentSettings = await loadSettings();
+  const [inactiveTitleMarkup, settings, activeTab] = await Promise.all([
+    getAlternatingInactiveTitleMarkup(),
+    loadSettings(),
+    getActiveTab(),
+  ]);
+  currentInactiveTitleMarkup = inactiveTitleMarkup;
+  currentSettings = settings;
   wireOptionsControls();
   renderOptionsPanel();
-  await refreshInfoPanelStats();
 
-  const activeTab = await getActiveTab();
   currentTabId = typeof activeTab?.id === "number" ? activeTab.id : null;
   currentSourceUrl = activeTab?.url ?? "";
   void syncActionIcon();
@@ -428,6 +465,23 @@ async function initializePopup(): Promise<void> {
   setResetEnabled(true);
   wireTopResetButton(seriesId);
 
+  const previewTitle = extractMangaBakaPreviewTitle(activeTab?.title);
+  if (previewTitle) {
+    renderMangaBakaHeader(previewTitle, []);
+  }
+
+  const sourceUrlSnapshot = currentSourceUrl;
+  const liveMangaBakaMetadataPromise = extractMetadataFromActiveTab()
+    .then((payload) => payload ? createMangaBakaMetadata(seriesId, sourceUrlSnapshot, payload) : null)
+    .catch(() => null);
+  void liveMangaBakaMetadataPromise.then((metadata) => {
+    if (!metadata || currentCache || currentSourceUrl !== sourceUrlSnapshot || currentProviderPage) {
+      return;
+    }
+
+    renderMangaBakaHeader(metadata.primaryTitle, metadata.authors);
+  });
+
   const cachedLookup = await loadCache(seriesId);
   if (cachedLookup) {
     currentCache = cachedLookup;
@@ -436,12 +490,44 @@ async function initializePopup(): Promise<void> {
     return;
   }
 
-  await runLookup(currentSourceUrl, seriesId, createEmptyRejectedProviderUrls(), { ...EMPTY_TITLE_ATTEMPT_INDEXES });
+  const liveMangaBakaMetadata = await liveMangaBakaMetadataPromise;
+  await runLookup(
+    currentSourceUrl,
+    seriesId,
+    createEmptyRejectedProviderUrls(),
+    { ...EMPTY_TITLE_ATTEMPT_INDEXES },
+    liveMangaBakaMetadata ?? undefined,
+  );
 }
 
-async function getActiveTab(): Promise<{ id?: number; url?: string } | null> {
+async function getActiveTab(): Promise<{ id?: number; url?: string; title?: string } | null> {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   return tabs[0] ?? null;
+}
+
+function isPopupMissingTabError(error: unknown): boolean {
+  return error instanceof Error && /No tab with id|Tabs cannot be edited right now|tab was closed/i.test(error.message);
+}
+
+async function resolveUsableTabId(): Promise<number | null> {
+  if (currentTabId != null) {
+    try {
+      await chrome.tabs.get(currentTabId);
+      return currentTabId;
+    } catch (error) {
+      if (!isPopupMissingTabError(error)) {
+        throw error;
+      }
+
+      currentTabId = null;
+    }
+  }
+
+  const activeTab = await getActiveTab();
+  const activeTabId = typeof activeTab?.id === "number" ? activeTab.id : null;
+  currentTabId = activeTabId;
+  currentSourceUrl = activeTab?.url ?? currentSourceUrl;
+  return activeTabId;
 }
 
 async function syncActionIcon(): Promise<void> {
@@ -458,6 +544,89 @@ async function syncActionIcon(): Promise<void> {
   } catch {
     return;
   }
+}
+
+function isReleaseUpdateInfo(value: unknown): value is ReleaseUpdateInfo {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const releaseInfo = value as Record<string, unknown>;
+  return (
+    typeof releaseInfo.checkedAt === "string"
+    && typeof releaseInfo.currentVersion === "string"
+    && typeof releaseInfo.latestReleaseUrl === "string"
+    && (releaseInfo.latestVersion == null || typeof releaseInfo.latestVersion === "string")
+    && (releaseInfo.latestTagName == null || typeof releaseInfo.latestTagName === "string")
+    && (releaseInfo.status === "up_to_date" || releaseInfo.status === "update_available")
+  );
+}
+
+function formatLatestReleaseLabel(value: string | null): string {
+  if (!value) {
+    return "Update";
+  }
+
+  return value.startsWith("v") ? value : `v${value}`;
+}
+
+function setInfoPanelLinkState(node: HTMLAnchorElement, label: string, url: string | null): void {
+  node.textContent = label;
+  if (url) {
+    node.href = url;
+    node.setAttribute("aria-disabled", "false");
+    node.tabIndex = 0;
+    return;
+  }
+
+  node.removeAttribute("href");
+  node.setAttribute("aria-disabled", "true");
+  node.tabIndex = -1;
+}
+
+function createMangaBakaMetadata(
+  seriesId: string,
+  sourceUrl: string,
+  extractedMetadata: ExtractedMetadataPayload,
+): MangaBakaMetadata {
+  return {
+    seriesId,
+    sourceUrl,
+    primaryTitle: pickPreferredTitle(extractedMetadata.titles),
+    titles: extractedMetadata.titles,
+    authors: extractedMetadata.authors,
+  };
+}
+
+function extractMangaBakaPreviewTitle(tabTitle?: string): string | null {
+  if (typeof tabTitle !== "string") {
+    return null;
+  }
+
+  const cleanedTitle = tabTitle.replace(/\s+manga information$/i, "").trim();
+  if (!cleanedTitle) {
+    return null;
+  }
+
+  const match = cleanedTitle.match(/^(.+?)\s*\((.+)\)$/);
+  return (match?.[1] ?? cleanedTitle).trim() || null;
+}
+
+function renderMangaBakaHeader(title: string, authors: string[]): void {
+  getTitleNode().classList.remove("title--inactive");
+  getTitleNode().textContent = title;
+  getSubtitleNode().textContent = authors[0] ? `by ${authors[0]}` : "Loading series details...";
+}
+
+function refreshInfoPanelStatsIfNeeded(force = false): Promise<void> {
+  if (!force && hasLoadedInfoPanelStats) {
+    return Promise.resolve();
+  }
+
+  infoPanelStatsRefreshPromise ??= refreshInfoPanelStats().finally(() => {
+    infoPanelStatsRefreshPromise = null;
+  });
+  return infoPanelStatsRefreshPromise;
 }
 
 function isMangabakaSeriesUrl(url: string): boolean {
@@ -665,6 +834,9 @@ async function updateSettings(settings: ExtensionSettings): Promise<void> {
 async function updateOptionsPanelTab(optionsPanelTab: OptionsPanelTab): Promise<void> {
   if (currentSettings.optionsPanelTab === optionsPanelTab) {
     renderOptionsPanelTabs();
+    if (optionsPanelTab === "info" && isOptionsPanelOpen()) {
+      void refreshInfoPanelStatsIfNeeded();
+    }
     return;
   }
 
@@ -673,6 +845,9 @@ async function updateOptionsPanelTab(optionsPanelTab: OptionsPanelTab): Promise<
     optionsPanelTab,
   };
   renderOptionsPanelTabs();
+  if (optionsPanelTab === "info" && isOptionsPanelOpen()) {
+    void refreshInfoPanelStatsIfNeeded();
+  }
   await saveSettings(currentSettings);
 }
 
@@ -726,6 +901,7 @@ function renderInfoPanel(): void {
     : "Click to show the version name";
   getInfoVersionNode().setAttribute("aria-label", getInfoVersionNode().title);
   renderInstallSourceInfo();
+  renderInstallUpdateInfo();
   renderCachedSeriesStat();
   getInfoMangaDexPurgeRow().hidden = !currentSettings.enabledProviders.mangadex;
   renderMangaDexPurgeStat();
@@ -748,6 +924,38 @@ function renderInstallSourceInfo(): void {
   installSourceNode.removeAttribute("href");
   installSourceNode.setAttribute("aria-disabled", "true");
   installSourceNode.tabIndex = -1;
+}
+
+function renderInstallUpdateInfo(): void {
+  const installSource = getInstallSourceInfo();
+  const installUpdateNode = getInfoInstallUpdateNode();
+
+  if (installSource.kind !== "local") {
+    delete installUpdateNode.dataset.updateStatus;
+    installUpdateNode.hidden = true;
+    setInfoPanelLinkState(installUpdateNode, "", null);
+    return;
+  }
+
+  installUpdateNode.hidden = false;
+  if (!currentReleaseUpdateInfo) {
+    installUpdateNode.dataset.updateStatus = "checking";
+    setInfoPanelLinkState(installUpdateNode, "[Checking...]", null);
+    return;
+  }
+
+  if (currentReleaseUpdateInfo.status === "update_available") {
+    installUpdateNode.dataset.updateStatus = "available";
+    setInfoPanelLinkState(
+      installUpdateNode,
+      `[${formatLatestReleaseLabel(currentReleaseUpdateInfo.latestTagName ?? currentReleaseUpdateInfo.latestVersion)} Available]`,
+      currentReleaseUpdateInfo.latestReleaseUrl,
+    );
+    return;
+  }
+
+  installUpdateNode.dataset.updateStatus = "up-to-date";
+  setInfoPanelLinkState(installUpdateNode, "[Up-to-date]", null);
 }
 
 function renderMangaDexPurgeStat(): void {
@@ -800,14 +1008,14 @@ function buildCachedResultFlags(
 
 function getInstallSourceInfo(): InstallSourceInfo {
   if (/\(Google\)$/i.test(EXTENSION_VERSION_NAME)) {
-    return { label: "Google", url: null };
+    return { kind: "google", label: "Google", url: null };
   }
 
   if (/\(Firefox\)$/i.test(EXTENSION_VERSION_NAME)) {
-    return { label: "Firefox", url: null };
+    return { kind: "firefox", label: "Firefox", url: null };
   }
 
-  return { label: "Local", url: LOCAL_INSTALL_SOURCE_URL };
+  return { kind: "local", label: "Local", url: LOCAL_INSTALL_SOURCE_URL };
 }
 
 function formatPercentage(numerator: number, denominator: number): string {
@@ -883,24 +1091,55 @@ function isCachedLookup(value: unknown): value is CachedLookup {
   return cache.version === CACHE_VERSION && typeof cache.seriesId === "string" && typeof cache.results === "object";
 }
 
+function getMangaDexChapterState(result: ProviderMatch | null): MangaDexChapterState | null {
+  if (result?.provider !== "MangaDex") {
+    return null;
+  }
+
+  if (result.manualMangaDexChapterState === "no_chapters_tld") {
+    return "no_chapters_tld";
+  }
+
+  if (typeof result.latestChapterNumber === "string" && result.latestChapterNumber.length > 0) {
+    return "available";
+  }
+
+  return result.mangaDexChapterState === "no_chapters_tld" ? "no_chapters_tld" : "purged";
+}
+
 function isMangadexPurgedResult(result: ProviderMatch | null): boolean {
-  return result?.provider === "MangaDex" && result.latestChapterNumber == null;
+  return getMangaDexChapterState(result) === "purged";
+}
+
+function isMangadexNoChaptersTlResult(result: ProviderMatch | null): boolean {
+  return getMangaDexChapterState(result) === "no_chapters_tld";
 }
 
 function isManuallyPurgedMangaDexResult(result: ProviderMatch | null): boolean {
   return result?.provider === "MangaDex" && typeof result.manualPurgedChapterNumber === "string" && result.manualPurgedChapterNumber.length > 0;
 }
 
-function canToggleMangaDexPurgedResult(result: ProviderMatch | null): boolean {
+function isManuallyNoChaptersTlMangaDexResult(result: ProviderMatch | null): boolean {
+  return result?.provider === "MangaDex" && result.manualMangaDexChapterState === "no_chapters_tld";
+}
+
+function canToggleMangaDexChapterState(result: ProviderMatch | null): boolean {
+  const chapterState = getMangaDexChapterState(result);
   return result?.provider === "MangaDex"
     && (
-      (typeof result.latestChapterNumber === "string" && result.latestChapterNumber.length > 0)
-      || isManuallyPurgedMangaDexResult(result)
+      chapterState === "available"
+      || chapterState === "purged"
+      || (isMangadexNoChaptersTlResult(result)
+        && isManuallyNoChaptersTlMangaDexResult(result)
+        && result.mangaDexChapterState === "purged")
     );
 }
 
 async function refreshInfoPanelStats(): Promise<void> {
   const storedEntries = await chrome.storage.local.get(null);
+  currentReleaseUpdateInfo = isReleaseUpdateInfo(storedEntries[POPUP_RELEASE_UPDATE_STORAGE_KEY])
+    ? storedEntries[POPUP_RELEASE_UPDATE_STORAGE_KEY]
+    : null;
   let purgedCount = 0;
   let totalCount = 0;
   let seriesCount = 0;
@@ -927,6 +1166,7 @@ async function refreshInfoPanelStats(): Promise<void> {
 
   currentCacheSeriesStats = { seriesCount, totalBytes };
   currentMangaDexPurgeStats = { purgedCount, totalCount };
+  hasLoadedInfoPanelStats = true;
   renderInfoPanel();
 }
 
@@ -965,6 +1205,9 @@ function setOptionsPanelOpen(isOpen: boolean): void {
   panel.hidden = !isOpen;
   if (isOpen) {
     clearPendingConfirmation();
+    if (currentSettings.optionsPanelTab === "info") {
+      void refreshInfoPanelStatsIfNeeded();
+    }
   }
   getOptionsButton().setAttribute("aria-expanded", isOpen ? "true" : "false");
 }
@@ -1036,11 +1279,21 @@ async function openUrlWithPreference(url: string, linkType: LinkTargetType): Pro
     return;
   }
 
-  if (currentTabId == null) {
+  const tabId = await resolveUsableTabId();
+  if (tabId == null) {
     throw new Error("No active tab available.");
   }
 
-  await chrome.tabs.update(currentTabId, { url });
+  try {
+    await chrome.tabs.update(tabId, { url });
+  } catch (error) {
+    if (!isPopupMissingTabError(error)) {
+      throw error;
+    }
+
+    await chrome.tabs.create({ url });
+  }
+
   window.close();
 }
 
@@ -1164,12 +1417,17 @@ async function extractProviderPageMetadata(
   sourceUrl: string,
   pageType: "series" | "chapter",
 ): Promise<ExtractedMetadataPayload | null> {
+  const liveMetadata = await extractProviderPageMetadataFromActiveTab(providerKey, sourceUrl);
+  if (liveMetadata?.titles.length) {
+    return liveMetadata;
+  }
+
   const fetchedMetadata = await fetchProviderPageMetadata(providerKey, sourceUrl, pageType);
   if (fetchedMetadata?.titles.length) {
     return fetchedMetadata;
   }
 
-  return extractProviderPageMetadataFromActiveTab(providerKey, sourceUrl);
+  return null;
 }
 
 async function fetchProviderPageMetadata(
@@ -1597,13 +1855,14 @@ async function extractProviderPageMetadataFromActiveTab(
   providerKey: ProviderKey,
   sourceUrl: string,
 ): Promise<ExtractedMetadataPayload | null> {
-  if (currentTabId == null) {
+  const tabId = await resolveUsableTabId();
+  if (tabId == null) {
     return null;
   }
 
   try {
     const results = await chrome.scripting.executeScript({
-      target: { tabId: currentTabId },
+      target: { tabId },
       args: [providerKey, sourceUrl],
       func: (activeProviderKey: ProviderKey, activeSourceUrl: string) => {
         const parsedSourceUrl = new URL(activeSourceUrl);
@@ -1967,7 +2226,11 @@ async function extractProviderPageMetadataFromActiveTab(
 
     const payload = results?.[0]?.result as ExtractedMetadataPayload | null | undefined;
     return payload && payload.titles.length > 0 ? payload : null;
-  } catch {
+  } catch (error) {
+    if (isPopupMissingTabError(error)) {
+      currentTabId = null;
+    }
+
     return null;
   }
 }
@@ -2158,13 +2421,14 @@ async function fetchMangaBakaMetadata(sourceUrl: string, seriesId: string): Prom
 }
 
 async function extractMetadataFromActiveTab(): Promise<ExtractedMetadataPayload | null> {
-  if (currentTabId == null) {
+  const tabId = await resolveUsableTabId();
+  if (tabId == null) {
     return null;
   }
 
   try {
     const results = await chrome.scripting.executeScript({
-      target: { tabId: currentTabId },
+      target: { tabId },
       func: () => {
         const normalizeTitle = (title: string): string =>
           title
@@ -2280,7 +2544,11 @@ async function extractMetadataFromActiveTab(): Promise<ExtractedMetadataPayload 
 
     const payload = results?.[0]?.result as ExtractedMetadataPayload | null | undefined;
     return payload && payload.titles.length > 0 ? payload : null;
-  } catch {
+  } catch (error) {
+    if (isPopupMissingTabError(error)) {
+      currentTabId = null;
+    }
+
     return null;
   }
 }
@@ -2512,23 +2780,33 @@ async function searchMangaDex(
     return null;
   }
 
+  const latestEnglishChapterInfo = await fetchMangaDexLatestEnglishChapterInfo(bestMatch.id);
   return {
     provider: "MangaDex",
     title: bestMatch.title,
     url: `https://mangadex.org/title/${bestMatch.id}/${slugifyTitle(bestMatch.title)}`,
-    latestChapterNumber: await fetchMangaDexLatestEnglishChapterNumber(bestMatch.id),
-    latestChapterLanguage: "en",
+    latestChapterNumber: latestEnglishChapterInfo.latestChapterNumber,
+    latestChapterLanguage: latestEnglishChapterInfo.latestChapterLanguage,
+    mangaDexChapterState: latestEnglishChapterInfo.mangaDexChapterState,
+    manualPurgedChapterNumber: null,
+    manualMangaDexChapterState: null,
   };
 }
 
-async function fetchMangaDexLatestEnglishChapterNumber(mangaId: string): Promise<string | null> {
+async function fetchMangaDexLatestEnglishChapterInfo(
+  mangaId: string,
+): Promise<Pick<ProviderMatch, "latestChapterNumber" | "latestChapterLanguage" | "mangaDexChapterState">> {
   try {
     const response = await fetch(
       `https://api.mangadex.org/manga/${encodeURIComponent(mangaId)}/feed?translatedLanguage[]=en&order[publishAt]=desc&limit=25`,
       { headers: { accept: "application/json" } },
     );
     if (!response.ok) {
-      return null;
+      return {
+        latestChapterNumber: null,
+        latestChapterLanguage: null,
+        mangaDexChapterState: "purged",
+      };
     }
 
     const payload = (await response.json()) as MangaDexFeedResponse;
@@ -2539,13 +2817,43 @@ async function fetchMangaDexLatestEnglishChapterNumber(mangaId: string): Promise
 
       const chapterNumber = formatChapterNumber(chapter.attributes?.chapter ?? null);
       if (chapterNumber) {
-        return chapterNumber;
+        return {
+          latestChapterNumber: chapterNumber,
+          latestChapterLanguage: "en",
+          mangaDexChapterState: null,
+        };
       }
     }
 
-    return null;
+    const hasAnyChapters = await fetchMangaDexHasAnyChapters(mangaId);
+    return {
+      latestChapterNumber: null,
+      latestChapterLanguage: null,
+      mangaDexChapterState: hasAnyChapters ? "purged" : "no_chapters_tld",
+    };
   } catch {
-    return null;
+    return {
+      latestChapterNumber: null,
+      latestChapterLanguage: null,
+      mangaDexChapterState: "purged",
+    };
+  }
+}
+
+async function fetchMangaDexHasAnyChapters(mangaId: string): Promise<boolean> {
+  try {
+    const response = await fetch(
+      `https://api.mangadex.org/manga/${encodeURIComponent(mangaId)}/feed?order[publishAt]=desc&limit=1`,
+      { headers: { accept: "application/json" } },
+    );
+    if (!response.ok) {
+      return true;
+    }
+
+    const payload = (await response.json()) as MangaDexFeedResponse;
+    return (payload.data?.length ?? 0) > 0;
+  } catch {
+    return true;
   }
 }
 
@@ -2621,191 +2929,57 @@ async function searchEHentai(
 }
 
 async function searchMangaFire(metadata: MangaBakaMetadata, rejectedUrls: string[], titleIndex: number): Promise<ProviderMatch | null> {
-  return (
-    (await searchViaYahoo(metadata, rejectedUrls, titleIndex, {
-      provider: "MangaFire",
-      siteQuery: "site:mangafire.to/manga",
-      matchUrl(url) {
-        return url.hostname === "mangafire.to" && url.pathname.startsWith("/manga/");
-      },
-      canonicalizeUrl(url) {
-        const segments = url.pathname.split("/").filter(Boolean);
-        if (segments.length < 2 || segments[0] !== "manga") {
-          return null;
-        }
+  return searchViaYahoo(metadata, rejectedUrls, titleIndex, {
+    provider: "MangaFire",
+    siteQuery: "site:mangafire.to/manga",
+    matchUrl(url) {
+      return url.hostname === "mangafire.to" && url.pathname.startsWith("/manga/");
+    },
+    canonicalizeUrl(url) {
+      const segments = url.pathname.split("/").filter(Boolean);
+      if (segments.length < 2 || segments[0] !== "manga") {
+        return null;
+      }
 
-        return `https://mangafire.to/manga/${segments[1]}`;
-      },
-      getCandidateTitles(result, url) {
-        return dedupeTitles([
-          cleanMangaFireResultTitle(result.title),
-          getMangaFireTitleFromUrl(url),
-        ]);
-      },
-      getDisplayTitle(result, url) {
-        return getMangaFireTitleFromUrl(url) || cleanMangaFireResultTitle(result.title) || "MangaFire";
-      },
-    })) ??
-    (await searchViaBrave(metadata, rejectedUrls, titleIndex, {
-      provider: "MangaFire",
-      siteQuery: "site:mangafire.to/manga",
-      matchUrl(url) {
-        return url.hostname === "mangafire.to" && url.pathname.startsWith("/manga/");
-      },
-      canonicalizeUrl(url) {
-        const segments = url.pathname.split("/").filter(Boolean);
-        if (segments.length < 2 || segments[0] !== "manga") {
-          return null;
-        }
-
-        return `https://mangafire.to/manga/${segments[1]}`;
-      },
-      getCandidateTitles(result, url) {
-        return dedupeTitles([
-          cleanMangaFireResultTitle(result.title),
-          getMangaFireTitleFromUrl(url),
-        ]);
-      },
-      getDisplayTitle(result, url) {
-        return getMangaFireTitleFromUrl(url) || cleanMangaFireResultTitle(result.title) || "MangaFire";
-      },
-    }))
-  );
+      return `https://mangafire.to/manga/${segments[1]}`;
+    },
+    getCandidateTitles(result, url) {
+      return dedupeTitles([
+        cleanMangaFireResultTitle(result.title),
+        getMangaFireTitleFromUrl(url),
+      ]);
+    },
+    getDisplayTitle(result, url) {
+      return getMangaFireTitleFromUrl(url) || cleanMangaFireResultTitle(result.title) || "MangaFire";
+    },
+  });
 }
 
 async function searchWeebCentral(metadata: MangaBakaMetadata, rejectedUrls: string[], titleIndex: number): Promise<ProviderMatch | null> {
-  return (
-    (await searchViaYahoo(metadata, rejectedUrls, titleIndex, {
-      provider: "WeebCentral",
-      siteQuery: "site:weebcentral.com/series",
-      matchUrl(url) {
-        return url.hostname === "weebcentral.com" && url.pathname.startsWith("/series/");
-      },
-      canonicalizeUrl(url) {
-        const segments = url.pathname.split("/").filter(Boolean);
-        if (segments.length < 3 || segments[0] !== "series") {
-          return null;
-        }
+  return searchViaYahoo(metadata, rejectedUrls, titleIndex, {
+    provider: "WeebCentral",
+    siteQuery: "site:weebcentral.com/series",
+    matchUrl(url) {
+      return url.hostname === "weebcentral.com" && url.pathname.startsWith("/series/");
+    },
+    canonicalizeUrl(url) {
+      const segments = url.pathname.split("/").filter(Boolean);
+      if (segments.length < 3 || segments[0] !== "series") {
+        return null;
+      }
 
-        return `https://weebcentral.com/series/${segments[1]}/${segments[2]}`;
-      },
-      getCandidateTitles(result, url) {
-        return dedupeTitles([
-          cleanWeebCentralResultTitle(result.title),
-          getWeebCentralTitleFromUrl(url),
-        ]);
-      },
-      getDisplayTitle(result, url) {
-        return getWeebCentralTitleFromUrl(url) || cleanWeebCentralResultTitle(result.title) || "WeebCentral";
-      },
-    })) ??
-    (await searchViaBrave(metadata, rejectedUrls, titleIndex, {
-      provider: "WeebCentral",
-      siteQuery: "site:weebcentral.com/series",
-      matchUrl(url) {
-        return url.hostname === "weebcentral.com" && url.pathname.startsWith("/series/");
-      },
-      canonicalizeUrl(url) {
-        const segments = url.pathname.split("/").filter(Boolean);
-        if (segments.length < 3 || segments[0] !== "series") {
-          return null;
-        }
-
-        return `https://weebcentral.com/series/${segments[1]}/${segments[2]}`;
-      },
-      getCandidateTitles(result, url) {
-        return dedupeTitles([
-          cleanWeebCentralResultTitle(result.title),
-          getWeebCentralTitleFromUrl(url),
-        ]);
-      },
-      getDisplayTitle(result, url) {
-        return getWeebCentralTitleFromUrl(url) || cleanWeebCentralResultTitle(result.title) || "WeebCentral";
-      },
-    }))
-  );
-}
-
-async function searchViaBrave(
-  metadata: MangaBakaMetadata,
-  rejectedUrls: string[],
-  titleIndex: number,
-  config: {
-    provider: ProviderMatch["provider"];
-    siteQuery: string;
-    matchUrl: (url: URL) => boolean;
-    canonicalizeUrl: (url: URL) => string | null;
-    getCandidateTitles: (result: BraveSearchResult, url: URL) => string[];
-    getDisplayTitle: (result: BraveSearchResult, url: URL) => string;
-  },
-): Promise<ProviderMatch | null> {
-  const rejectedUrlSet = new Set(rejectedUrls);
-  const normalizedSourceTitles = metadata.titles.map(normalizeTitle).filter(Boolean);
-  const title = metadata.titles[titleIndex];
-  if (!title) {
-    return null;
-  }
-
-  let html = "";
-  try {
-    const response = await fetch(
-      `https://search.brave.com/search?q=${encodeURIComponent(`${config.siteQuery} ${title}`)}&source=web`,
-      { headers: { accept: "text/html" } },
-    );
-    if (!response.ok) {
-      return null;
-    }
-
-    html = await response.text();
-  } catch {
-    return null;
-  }
-
-  const searchResults = extractBraveSearchResults(html);
-  const candidates = new Map<string, { url: string; title: string; score: number }>();
-
-  for (const result of searchResults) {
-    let parsedUrl: URL;
-    try {
-      parsedUrl = new URL(result.url);
-    } catch {
-      continue;
-    }
-
-    if (!config.matchUrl(parsedUrl)) {
-      continue;
-    }
-
-    const canonicalUrl = config.canonicalizeUrl(parsedUrl);
-    if (!canonicalUrl || rejectedUrlSet.has(canonicalUrl)) {
-      continue;
-    }
-
-    const candidateTitles = config.getCandidateTitles(result, parsedUrl);
-    const score = Math.max(0, ...candidateTitles.map((candidateTitle) => scoreTitleMatch(candidateTitle, normalizedSourceTitles)));
-    if (score < 90) {
-      continue;
-    }
-
-    const displayTitle = config.getDisplayTitle(result, parsedUrl);
-    const existingCandidate = candidates.get(canonicalUrl);
-    if (!existingCandidate || score > existingCandidate.score) {
-      candidates.set(canonicalUrl, { url: canonicalUrl, title: displayTitle, score });
-    }
-  }
-
-  const bestMatch = pickBestCandidate(candidates);
-  if (!bestMatch) {
-    return null;
-  }
-
-  return {
-    provider: config.provider,
-    title: bestMatch.title,
-    url: bestMatch.url,
-    latestChapterNumber: null,
-    latestChapterLanguage: null,
-  };
+      return `https://weebcentral.com/series/${segments[1]}/${segments[2]}`;
+    },
+    getCandidateTitles(result, url) {
+      return dedupeTitles([
+        cleanWeebCentralResultTitle(result.title),
+        getWeebCentralTitleFromUrl(url),
+      ]);
+    },
+    getDisplayTitle(result, url) {
+      return getWeebCentralTitleFromUrl(url) || cleanWeebCentralResultTitle(result.title) || "WeebCentral";
+    },
+  });
 }
 
 async function searchViaYahoo(
@@ -2817,8 +2991,8 @@ async function searchViaYahoo(
     siteQuery: string;
     matchUrl: (url: URL) => boolean;
     canonicalizeUrl: (url: URL) => string | null;
-    getCandidateTitles: (result: BraveSearchResult, url: URL) => string[];
-    getDisplayTitle: (result: BraveSearchResult, url: URL) => string;
+    getCandidateTitles: (result: SearchResultEntry, url: URL) => string[];
+    getDisplayTitle: (result: SearchResultEntry, url: URL) => string;
   },
 ): Promise<ProviderMatch | null> {
   const rejectedUrlSet = new Set(rejectedUrls);
@@ -2890,30 +3064,11 @@ async function searchViaYahoo(
   };
 }
 
-function extractBraveSearchResults(html: string): BraveSearchResult[] {
-  const seenUrls = new Set<string>();
-  const results: BraveSearchResult[] = [];
-  const pattern = /https?:\/\/[^\s"'<>]+/gi;
-  let match: RegExpExecArray | null;
-
-  while ((match = pattern.exec(html)) !== null) {
-    const url = decodeHtmlText(match[0] ?? "").replace(/&amp;/g, "&");
-    if (!url || !url.startsWith("http") || seenUrls.has(url)) {
-      continue;
-    }
-
-    seenUrls.add(url);
-    results.push({ url, title: "", cite: "" });
-  }
-
-  return results;
-}
-
-function extractYahooSearchResults(html: string): BraveSearchResult[] {
+function extractYahooSearchResults(html: string): SearchResultEntry[] {
   const documentNode = new DOMParser().parseFromString(html, "text/html");
   const anchors = Array.from(documentNode.querySelectorAll<HTMLAnchorElement>('a[href^="https://r.search.yahoo.com/"]'));
   const seenUrls = new Set<string>();
-  const results: BraveSearchResult[] = [];
+  const results: SearchResultEntry[] = [];
 
   for (const anchor of anchors) {
     const redirectUrl = anchor.getAttribute("href")?.trim();
@@ -3269,7 +3424,7 @@ async function getAlternatingInactiveTitleMarkup(): Promise<string> {
   const storageKey = "ui:inactiveTitleVariant";
   const stored = await chrome.storage.local.get(storageKey);
   const nextVariant = stored[storageKey] === "jp-first" ? "en-first" : "jp-first";
-  await chrome.storage.local.set({ [storageKey]: nextVariant });
+  void chrome.storage.local.set({ [storageKey]: nextVariant });
 
   return nextVariant === "jp-first"
     ? '<span class="brand-white">マンガ</span> <span class="brand-red">Baka</span>'
@@ -3508,24 +3663,28 @@ function renderProviderRows(
 
     const meta = document.createElement("div");
     meta.className = "provider-value-meta";
-    if (providerResult?.latestChapterNumber) {
-      const latestLabel = `Ch. ${providerResult.latestChapterNumber.replace(/^page\.\s*/i, "")}`;
-      meta.innerHTML = `${ENGLISH_FLAG_ICON}<span>${escapeHtml(latestLabel)}</span>`;
-      if (provider.key === "mangadex" && canToggleMangaDexPurgedResult(providerResult)) {
+    const mangaDexChapterState = provider.key === "mangadex" ? getMangaDexChapterState(providerResult) : null;
+    if (provider.key === "mangadex" && providerResult) {
+      if (mangaDexChapterState === "available" && providerResult.latestChapterNumber) {
+        const latestLabel = `Ch. ${providerResult.latestChapterNumber.replace(/^page\.\s*/i, "")}`;
+        meta.innerHTML = `${ENGLISH_FLAG_ICON}<span>${escapeHtml(latestLabel)}</span>`;
+      } else if (mangaDexChapterState === "no_chapters_tld") {
+        meta.innerHTML = `${ENGLISH_FLAG_ICON}<span>No Chapters TL'd</span>`;
+      } else {
+        meta.innerHTML = `${ENGLISH_FLAG_ICON}<span>Purged</span>`;
+        meta.append(createStatusIconSvg("provider-value-status-icon", "pensive"));
+      }
+
+      if (canToggleMangaDexChapterState(providerResult)) {
         meta.onclick = () => {
           void toggleMangaDexPurgedState();
         };
       }
+    } else if (providerResult?.latestChapterNumber) {
+      const latestLabel = `Ch. ${providerResult.latestChapterNumber.replace(/^page\.\s*/i, "")}`;
+      meta.innerHTML = `${ENGLISH_FLAG_ICON}<span>${escapeHtml(latestLabel)}</span>`;
     } else if (providerResult) {
-      if (provider.key === "mangadex") {
-        meta.innerHTML = `${ENGLISH_FLAG_ICON}<span>Purged</span>`;
-        meta.append(createStatusIconSvg("provider-value-status-icon", "pensive"));
-        if (isManuallyPurgedMangaDexResult(providerResult)) {
-          meta.onclick = () => {
-            void toggleMangaDexPurgedState();
-          };
-        }
-      } else if (provider.key === "mangafire" || provider.key === "weebcentral") {
+      if (provider.key === "mangafire" || provider.key === "weebcentral") {
         meta.textContent = "Cloudflare Error";
       } else {
         meta.textContent = "";
@@ -3871,6 +4030,7 @@ async function handleProviderRefresh(providerKey: ProviderKey): Promise<void> {
 
   let latestChapterNumber = currentResult.latestChapterNumber;
   let latestChapterLanguage = currentResult.latestChapterLanguage;
+  let mangaDexChapterState = currentResult.mangaDexChapterState ?? null;
   if (providerKey === "atsu") {
     const mangaId = getAtsumaruMangaIdFromUrl(currentResult.url);
     if (mangaId) {
@@ -3880,8 +4040,10 @@ async function handleProviderRefresh(providerKey: ProviderKey): Promise<void> {
   } else if (providerKey === "mangadex") {
     const mangaId = getMangaDexMangaIdFromUrl(currentResult.url);
     if (mangaId) {
-      latestChapterNumber = await fetchMangaDexLatestEnglishChapterNumber(mangaId);
-      latestChapterLanguage = "en";
+      const latestEnglishChapterInfo = await fetchMangaDexLatestEnglishChapterInfo(mangaId);
+      latestChapterNumber = latestEnglishChapterInfo.latestChapterNumber;
+      latestChapterLanguage = latestEnglishChapterInfo.latestChapterLanguage;
+      mangaDexChapterState = latestEnglishChapterInfo.mangaDexChapterState ?? null;
     }
   }
 
@@ -3891,13 +4053,26 @@ async function handleProviderRefresh(providerKey: ProviderKey): Promise<void> {
     title,
     latestChapterNumber,
     latestChapterLanguage,
-    manualPurgedChapterNumber: null,
+    ...(providerKey === "mangadex"
+      ? {
+          mangaDexChapterState,
+          manualPurgedChapterNumber: null,
+          manualMangaDexChapterState: null,
+        }
+      : {}),
   };
   const changed =
     updatedResult.title !== currentResult.title
     || updatedResult.latestChapterNumber !== currentResult.latestChapterNumber
     || updatedResult.latestChapterLanguage !== currentResult.latestChapterLanguage
-    || Boolean(currentResult.manualPurgedChapterNumber);
+    || (
+      providerKey === "mangadex"
+      && (
+        updatedResult.mangaDexChapterState !== currentResult.mangaDexChapterState
+        || Boolean(currentResult.manualPurgedChapterNumber)
+        || Boolean(currentResult.manualMangaDexChapterState)
+      )
+    );
 
   const updatedCache: CachedLookup = {
     ...currentCache,
@@ -3928,22 +4103,52 @@ async function toggleMangaDexPurgedState(): Promise<void> {
   }
 
   const currentResult = currentCache.results.mangadex;
-  if (!currentResult || currentResult.provider !== "MangaDex" || !canToggleMangaDexPurgedResult(currentResult)) {
+  if (!currentResult || currentResult.provider !== "MangaDex" || !canToggleMangaDexChapterState(currentResult)) {
     return;
   }
 
   const mangaDexResult = currentResult;
-  const updatedResult: ProviderMatch = mangaDexResult.latestChapterNumber
-    ? {
-        ...mangaDexResult,
-        manualPurgedChapterNumber: mangaDexResult.latestChapterNumber,
-        latestChapterNumber: null,
-      }
-    : {
-        ...mangaDexResult,
-        latestChapterNumber: mangaDexResult.manualPurgedChapterNumber ?? null,
-        manualPurgedChapterNumber: null,
-      };
+  const mangaDexChapterState = getMangaDexChapterState(mangaDexResult);
+  let updatedResult: ProviderMatch;
+  let statusMessage: string;
+
+  if (mangaDexChapterState === "available" && mangaDexResult.latestChapterNumber) {
+    updatedResult = {
+      ...mangaDexResult,
+      manualPurgedChapterNumber: mangaDexResult.latestChapterNumber,
+      latestChapterNumber: null,
+      mangaDexChapterState: "purged",
+      manualMangaDexChapterState: null,
+    };
+    statusMessage = "MangaDex marked as purged";
+  } else if (isManuallyPurgedMangaDexResult(mangaDexResult)) {
+    updatedResult = {
+      ...mangaDexResult,
+      latestChapterNumber: mangaDexResult.manualPurgedChapterNumber ?? null,
+      manualPurgedChapterNumber: null,
+      mangaDexChapterState: null,
+      manualMangaDexChapterState: null,
+    };
+    statusMessage = "MangaDex purge cleared";
+  } else if (
+    mangaDexChapterState === "no_chapters_tld"
+    && isManuallyNoChaptersTlMangaDexResult(mangaDexResult)
+    && mangaDexResult.mangaDexChapterState === "purged"
+  ) {
+    updatedResult = {
+      ...mangaDexResult,
+      manualMangaDexChapterState: null,
+    };
+    statusMessage = "MangaDex marked as purged";
+  } else if (mangaDexChapterState === "purged") {
+    updatedResult = {
+      ...mangaDexResult,
+      manualMangaDexChapterState: "no_chapters_tld",
+    };
+    statusMessage = "MangaDex marked as having no translated chapters";
+  } else {
+    return;
+  }
 
   const updatedCache: CachedLookup = {
     ...currentCache,
@@ -3957,11 +4162,12 @@ async function toggleMangaDexPurgedState(): Promise<void> {
   await saveCache(updatedCache);
   currentCache = updatedCache;
   rerenderCurrentResultsOnly();
-  setStatus(updatedResult.latestChapterNumber ? "MangaDex purge cleared" : "MangaDex marked as purged", "success");
+  setStatus(statusMessage, "success");
 }
 
 async function saveReadLink(providerKey: ProviderKey, url: string, providerLabel: string): Promise<void> {
-  if (currentTabId == null) {
+  const tabId = await resolveUsableTabId();
+  if (tabId == null) {
     setStatus("No active MangaBaka tab available", "error");
     return;
   }
@@ -3970,7 +4176,7 @@ async function saveReadLink(providerKey: ProviderKey, url: string, providerLabel
 
   try {
     const results = await chrome.scripting.executeScript({
-      target: { tabId: currentTabId },
+      target: { tabId },
       args: [url],
       func: async (readLinkUrl: string) => {
         const sleep = (ms: number): Promise<void> =>
@@ -4462,6 +4668,12 @@ async function saveReadLink(providerKey: ProviderKey, url: string, providerLabel
     rerenderCurrentResultsOnly();
     setStatus(`${providerLabel} saved as MangaBaka Read Link`, "success");
   } catch (error) {
+    if (isPopupMissingTabError(error)) {
+      currentTabId = null;
+      setStatus("The active MangaBaka tab is no longer available.", "error");
+      return;
+    }
+
     setStatus(error instanceof Error ? error.message : "Unable to save MangaBaka Read Link", "error");
   }
 }
@@ -4825,6 +5037,10 @@ function getInfoVersionNode(): HTMLButtonElement {
 
 function getInfoInstallSourceNode(): HTMLAnchorElement {
   return document.getElementById("info-install-source") as HTMLAnchorElement;
+}
+
+function getInfoInstallUpdateNode(): HTMLAnchorElement {
+  return document.getElementById("info-install-update") as HTMLAnchorElement;
 }
 
 function getInfoMangaDexPurgeRow(): HTMLElement {

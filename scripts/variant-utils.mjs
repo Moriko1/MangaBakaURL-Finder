@@ -1,3 +1,4 @@
+// noinspection JSUnusedGlobalSymbols
 import { mkdirSync, readFileSync, rmSync, writeFileSync, cpSync, existsSync, readdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
@@ -27,6 +28,9 @@ export const GENERATED_REPORT_FILE_NAMES = [
   "index.html",
   "script.js",
   "styles.css",
+];
+export const GENERATED_FILE_PATHS = [
+  "src/build-info.ts",
 ];
 
 export function assertVariant(variant) {
@@ -99,6 +103,10 @@ export function cleanGeneratedArtifacts(root) {
     cleanPath(resolve(root, fileName));
   }
 
+  for (const filePath of GENERATED_FILE_PATHS) {
+    cleanPath(resolve(root, filePath));
+  }
+
   for (const fileName of readdirSync(root)) {
     if (/^report_.*\.sarif\.json$/i.test(fileName)) {
       cleanPath(resolve(root, fileName));
@@ -107,6 +115,7 @@ export function cleanGeneratedArtifacts(root) {
 }
 
 export function createVariantManifest(variant, manifestContent) {
+  /** @type {{ version: string, version_name?: string, host_permissions?: string[] } & Record<string, unknown>} */
   const manifest = JSON.parse(manifestContent);
   manifest.host_permissions = getVariantHostPermissions(variant);
 
@@ -409,16 +418,17 @@ const DEFAULT_SETTINGS: ExtensionSettings = {
 export function getVariantHostPermissions(variant) {
   return variant === "google" || variant === "firefox"
     ? [
+      "https://api.github.com/*",
       "https://mangabaka.org/*",
       "https://mangadex.org/*",
       "https://atsu.moe/*",
       "https://mangafire.to/*",
       "https://weebcentral.com/*",
       "https://api.mangadex.org/*",
-      "https://search.brave.com/*",
       "https://search.yahoo.com/*",
     ]
     : [
+      "https://api.github.com/*",
       "https://mangabaka.org/*",
       "https://mangadex.org/*",
       "https://atsu.moe/*",
@@ -427,7 +437,6 @@ export function getVariantHostPermissions(variant) {
       "https://api.mangadex.org/*",
       "https://e-hentai.org/*",
       "https://exhentai.org/*",
-      "https://search.brave.com/*",
       "https://search.yahoo.com/*",
     ];
 }

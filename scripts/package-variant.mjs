@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import process, { argv, execPath } from "node:process";
 import {
   assertVariant,
   cleanPath,
@@ -14,7 +15,7 @@ import {
   writeTextFile,
 } from "./variant-utils.mjs";
 
-const variant = process.argv[2] ?? "google";
+const variant = argv[2] ?? "google";
 assertVariant(variant);
 
 const root = process.cwd();
@@ -22,7 +23,7 @@ const buildScriptPath = resolve(root, "scripts", "build-variant.mjs");
 const outputDir = resolve(root, getVariantPackageDirectoryName(variant));
 const distDir = resolve(root, getVariantBuildDirectoryName(variant));
 
-execFileSync(process.execPath, [buildScriptPath, variant], {
+execFileSync(execPath, [buildScriptPath, variant], {
   cwd: root,
   stdio: "inherit",
 });

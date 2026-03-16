@@ -1,5 +1,6 @@
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import process from "node:process";
 
 function formatBuildDate(date) {
   const year = date.getFullYear();

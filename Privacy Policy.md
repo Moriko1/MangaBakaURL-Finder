@@ -1,6 +1,6 @@
 # Privacy Policy
 
-Last updated: 2026-03-15
+Last updated: 2026-03-16
 
 ## Overview
 
@@ -45,10 +45,13 @@ The extension sends requests only when needed to perform user-facing features su
 - Reading provider chapter data.
 - Saving a provider URL into MangaBaka's `Read Link` field when requested by the user.
 - Opening provider or MangaBaka pages requested by the user.
+- Checking the latest GitHub release once per day for local installs.
 
 Depending on enabled providers and the active page, requests may be sent to:
 
 - Domain: `mangabaka.org`
+- Domain: `github.com`
+- Domain: `api.github.com`
 - Domain: `atsu.moe`
 - Domain: `mangadex.org`
 - Domain: `api.mangadex.org`
@@ -56,7 +59,6 @@ Depending on enabled providers and the active page, requests may be sent to:
 - Domain: `weebcentral.com`
 - Domain: `e-hentai.org`
 - Domain: `exhentai.org`
-- Domain: `search.brave.com`
 - Domain: `search.yahoo.com`
 
 Google and Firefox packaged variants exclude `E-Hentai` and `ExHentai`.
