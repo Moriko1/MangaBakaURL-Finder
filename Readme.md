@@ -4,6 +4,10 @@ Browser extension for matching MangaBaka series to provider URLs and searching M
 
 **Not affiliated with the MangaBaka development team**
 
+Google: Link TBD
+
+Firefox: Link TBD
+
 ## Overview
 
 #### Workflow:
@@ -54,6 +58,12 @@ Notes:
 
 ## Extension Instructions
 
+### Version Differences
+
+- `Complete`: Full feature set
+- `Google`: Excludes `E-Hentai` and `ExHentai`
+- `Firefox`: Excludes `E-Hentai` and `ExHentai`
+
 ### Chromium Browsers
 
 1. Run `npm run build`
@@ -68,12 +78,6 @@ Notes:
 2. Open `about:debugging#/runtime/this-firefox`
 3. Click `Load Temporary Add-on`
 4. Select `webstore-package-firefox/manifest.json`
-
-## Variant Packages
-
-- `Complete`: Full feature set
-- `Google`: Excludes `E-Hentai` and `ExHentai`
-- `Firefox`: Excludes `E-Hentai` and `ExHentai`
 
 ## Privacy
 
