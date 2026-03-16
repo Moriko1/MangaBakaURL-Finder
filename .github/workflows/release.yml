@@ -5,6 +5,15 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Existing release tag to publish, for example v1.4.4
+        required: true
+        type: string
+      highlights:
+        description: Optional newline-separated highlight bullets for the release notes
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -12,10 +21,15 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -26,8 +40,8 @@ jobs:
       - name: Require a version tag
         shell: bash
         run: |
-          if [[ "${GITHUB_REF}" != refs/tags/v* ]]; then
-            echo "This workflow must run from a v* tag."
+          if [[ -z "${RELEASE_TAG}" || "${RELEASE_TAG}" != v* ]]; then
+            echo "Release tag must match v*."
             exit 1
           fi
 
@@ -37,7 +51,7 @@ jobs:
         run: |
           package_version="$(node -p "require('./package.json').version")"
           manifest_version="$(node -p "require('./manifest.json').version")"
-          tag_name="${GITHUB_REF_NAME}"
+          tag_name="${RELEASE_TAG}"
 
           if [[ "${package_version}" != "${manifest_version}" ]]; then
             echo "package.json version (${package_version}) does not match manifest.json version (${manifest_version})."
@@ -71,12 +85,73 @@ jobs:
             )
           done
 
+      - name: Build release notes
+        shell: bash
+        env:
+          RELEASE_HIGHLIGHTS_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.highlights || '' }}
+        run: |
+          node - <<'NODE'
+          const { execFileSync } = require("node:child_process");
+          const { writeFileSync } = require("node:fs");
+
+          const tag = process.env.RELEASE_TAG;
+          const explicitHighlights = process.env.RELEASE_HIGHLIGHTS_INPUT ?? "";
+          const repository = process.env.GITHUB_REPOSITORY;
+
+          function git(args) {
+            return execFileSync("git", args, { encoding: "utf8" }).trim();
+          }
+
+          function gitOrEmpty(args) {
+            try {
+              return git(args);
+            } catch {
+              return "";
+            }
+          }
+
+          function normalizeBullets(source) {
+            return source
+              .split(/\r?\n/)
+              .map((line) => line.trim())
+              .filter(Boolean)
+              .map((line) => (/^[-*]\s+/.test(line) ? line.replace(/^- /, "* ") : `* ${line}`))
+              .join("\n");
+          }
+
+          const sortedTags = gitOrEmpty(["tag", "--sort=version:refname"])
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter(Boolean);
+          const currentTagIndex = sortedTags.indexOf(tag);
+          const previousTag = currentTagIndex > 0 ? sortedTags[currentTagIndex - 1] : "";
+
+          const tagObjectType = gitOrEmpty(["cat-file", "-t", tag]);
+          const tagHighlights = tagObjectType === "tag"
+            ? gitOrEmpty(["for-each-ref", `refs/tags/${tag}`, "--format=%(contents)"])
+            : "";
+          const changelogEntries = gitOrEmpty(["log", "--reverse", "--pretty=format:* %s (%h)", ...(previousTag ? [`${previousTag}..${tag}`] : [tag])]);
+          const compareLine = previousTag ? `* Compare changes: https://github.com/${repository}/compare/${previousTag}...${tag}` : "";
+
+          const defaultHighlights = [
+            `* Release ${tag} published on GitHub`,
+            "* Includes Complete, Google, and Firefox package variants",
+            "* See Full Changelog below for detailed changes",
+          ].join("\n");
+
+          const highlights = normalizeBullets(explicitHighlights.trim() || tagHighlights || defaultHighlights);
+          const changelog = [changelogEntries || "* Initial release", compareLine].filter(Boolean).join("\n");
+          const body = `## Highlights\n${highlights}\n\n## Full Changelog\n${changelog}\n`;
+
+          writeFileSync("release-notes.md", body, "utf8");
+          NODE
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           name: MangaBaka URL Finder v${{ steps.meta.outputs.version }}
-          tag_name: ${{ github.ref_name }}
-          generate_release_notes: true
+          tag_name: ${{ env.RELEASE_TAG }}
+          body_path: release-notes.md
           fail_on_unmatched_files: true
           overwrite_files: true
           files: |

@@ -6,11 +6,9 @@
 /webstore-package-complete
 /webstore-package-firefox
 /webstore-package-google
+/mangabaka-url-finder-v*.zip
 /.DS_Store
-/.idea/*
-!/.idea/.gitignore
-!/.idea/dictionaries/
-!/.idea/dictionaries/Project.xml
+/.idea/
 /.descriptions.xml
 /Css*.xml
 /ES6MissingAwait.xml
@@ -38,4 +36,4 @@ yarn-error.log*
 /.pnp
 .pnp.js
 
-.vscode/*
+/.vscode/
