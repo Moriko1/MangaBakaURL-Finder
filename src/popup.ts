@@ -15,7 +15,7 @@ interface ProviderMatch {
   latestChapterLanguage: "en" | null;
   manualPurgedChapterNumber?: string | null;
   mangaDexChapterState?: StoredMangaDexChapterState | null;
-  manualMangaDexChapterState?: "no_chapters_tld" | null;
+  manualMangaDexChapterState?: StoredMangaDexChapterState | null;
 }
 
 interface LookupResults {
@@ -88,6 +88,15 @@ interface MangaDexFeedResponse {
       translatedLanguage?: string | null;
     };
   }>;
+}
+
+interface MangaDexMangaResponse {
+  data?: {
+    attributes?: {
+      availableTranslatedLanguages?: string[] | null;
+      latestUploadedChapter?: string | null;
+    };
+  };
 }
 
 interface ExtractedMetadataPayload {
@@ -544,6 +553,22 @@ async function syncActionIcon(): Promise<void> {
   } catch {
     return;
   }
+}
+
+function requestReleaseUpdateStatus(): void {
+  if (getInstallSourceInfo().kind !== "local") {
+    return;
+  }
+
+  void (async () => {
+    try {
+      await chrome.runtime.sendMessage({
+        type: "ensure-release-update-status",
+      });
+    } catch {
+      return;
+    }
+  })();
 }
 
 function isReleaseUpdateInfo(value: unknown): value is ReleaseUpdateInfo {
@@ -1096,8 +1121,8 @@ function getMangaDexChapterState(result: ProviderMatch | null): MangaDexChapterS
     return null;
   }
 
-  if (result.manualMangaDexChapterState === "no_chapters_tld") {
-    return "no_chapters_tld";
+  if (result.manualMangaDexChapterState === "purged" || result.manualMangaDexChapterState === "no_chapters_tld") {
+    return result.manualMangaDexChapterState;
   }
 
   if (typeof result.latestChapterNumber === "string" && result.latestChapterNumber.length > 0) {
@@ -1129,13 +1154,12 @@ function canToggleMangaDexChapterState(result: ProviderMatch | null): boolean {
     && (
       chapterState === "available"
       || chapterState === "purged"
-      || (isMangadexNoChaptersTlResult(result)
-        && isManuallyNoChaptersTlMangaDexResult(result)
-        && result.mangaDexChapterState === "purged")
+      || chapterState === "no_chapters_tld"
     );
 }
 
 async function refreshInfoPanelStats(): Promise<void> {
+  requestReleaseUpdateStatus();
   const storedEntries = await chrome.storage.local.get(null);
   currentReleaseUpdateInfo = isReleaseUpdateInfo(storedEntries[POPUP_RELEASE_UPDATE_STORAGE_KEY])
     ? storedEntries[POPUP_RELEASE_UPDATE_STORAGE_KEY]
@@ -2826,10 +2850,19 @@ async function fetchMangaDexLatestEnglishChapterInfo(
     }
 
     const hasAnyChapters = await fetchMangaDexHasAnyChapters(mangaId);
+    if (hasAnyChapters) {
+      return {
+        latestChapterNumber: null,
+        latestChapterLanguage: null,
+        mangaDexChapterState: "purged",
+      };
+    }
+
+    const hasUnavailableChapters = await fetchMangaDexHasUnavailableChapters(mangaId);
     return {
       latestChapterNumber: null,
       latestChapterLanguage: null,
-      mangaDexChapterState: hasAnyChapters ? "purged" : "no_chapters_tld",
+      mangaDexChapterState: hasUnavailableChapters ? "purged" : "no_chapters_tld",
     };
   } catch {
     return {
@@ -2852,6 +2885,24 @@ async function fetchMangaDexHasAnyChapters(mangaId: string): Promise<boolean> {
 
     const payload = (await response.json()) as MangaDexFeedResponse;
     return (payload.data?.length ?? 0) > 0;
+  } catch {
+    return true;
+  }
+}
+
+async function fetchMangaDexHasUnavailableChapters(mangaId: string): Promise<boolean> {
+  try {
+    const response = await fetch(`https://api.mangadex.org/manga/${encodeURIComponent(mangaId)}`, {
+      headers: { accept: "application/json" },
+    });
+    if (!response.ok) {
+      return true;
+    }
+
+    const payload = (await response.json()) as MangaDexMangaResponse;
+    const availableTranslatedLanguages = payload.data?.attributes?.availableTranslatedLanguages ?? [];
+    const latestUploadedChapter = payload.data?.attributes?.latestUploadedChapter;
+    return availableTranslatedLanguages.length > 0 || (typeof latestUploadedChapter === "string" && latestUploadedChapter.length > 0);
   } catch {
     return true;
   }
@@ -4109,6 +4160,7 @@ async function toggleMangaDexPurgedState(): Promise<void> {
 
   const mangaDexResult = currentResult;
   const mangaDexChapterState = getMangaDexChapterState(mangaDexResult);
+  const baseMangaDexChapterState = mangaDexResult.mangaDexChapterState === "no_chapters_tld" ? "no_chapters_tld" : "purged";
   let updatedResult: ProviderMatch;
   let statusMessage: string;
 
@@ -4130,20 +4182,16 @@ async function toggleMangaDexPurgedState(): Promise<void> {
       manualMangaDexChapterState: null,
     };
     statusMessage = "MangaDex purge cleared";
-  } else if (
-    mangaDexChapterState === "no_chapters_tld"
-    && isManuallyNoChaptersTlMangaDexResult(mangaDexResult)
-    && mangaDexResult.mangaDexChapterState === "purged"
-  ) {
+  } else if (mangaDexChapterState === "no_chapters_tld") {
     updatedResult = {
       ...mangaDexResult,
-      manualMangaDexChapterState: null,
+      manualMangaDexChapterState: baseMangaDexChapterState === "purged" ? null : "purged",
     };
     statusMessage = "MangaDex marked as purged";
   } else if (mangaDexChapterState === "purged") {
     updatedResult = {
       ...mangaDexResult,
-      manualMangaDexChapterState: "no_chapters_tld",
+      manualMangaDexChapterState: baseMangaDexChapterState === "no_chapters_tld" ? null : "no_chapters_tld",
     };
     statusMessage = "MangaDex marked as having no translated chapters";
   } else {

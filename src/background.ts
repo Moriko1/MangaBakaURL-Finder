@@ -447,6 +447,18 @@ async function syncReleaseUpdateSchedule(forceCheck = false): Promise<void> {
   return releaseUpdateSyncPromise;
 }
 
+async function ensureReleaseUpdateStatus(): Promise<void> {
+  if (!isLocalInstallSource()) {
+    await clearReleaseUpdateState();
+    return;
+  }
+
+  const currentVersion = normalizeVersion(BACKGROUND_EXTENSION_VERSION) ?? BACKGROUND_EXTENSION_VERSION;
+  const record = await loadReleaseUpdateRecord();
+  const hasCurrentRecord = record?.currentVersion === currentVersion;
+  await syncReleaseUpdateSchedule(!hasCurrentRecord);
+}
+
 function getProviderKeyForUrl(url?: string): keyof typeof BACKGROUND_DEFAULT_ENABLED_PROVIDERS | null {
   if (!url) {
     return null;
@@ -591,6 +603,6 @@ chrome.runtime.onMessage.addListener((message: { type?: string; tabId?: number; 
   }
 
   if (message.type === "ensure-release-update-status") {
-    void syncReleaseUpdateSchedule();
+    void ensureReleaseUpdateStatus();
   }
 });
