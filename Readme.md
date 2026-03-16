@@ -42,6 +42,13 @@ Notes:
 - `ExHentai` depends on browser cookies for authenticated access
 - Google and Firefox packaged variants exclude `E-Hentai` and `ExHentai` due to 18+ limitations
 
+## Setup/Build
+
+1. Install Node.js
+2. Run `npm ci`
+3. Run `npm run build`
+4. Run `npm run package:all`
+
 ## Scripts
 
 - `npm run clean` removes generated build and package folders
@@ -56,9 +63,7 @@ Notes:
 - `npm run package:firefox` prepares `webstore-package-firefox/`
 - `npm run package:all` packages all three variants sequentially
 
-## Extension Instructions
-
-### Version Differences
+## Version Differences
 
 - `Complete`: Full feature set
 - `Google`: Excludes `E-Hentai` and `ExHentai`
