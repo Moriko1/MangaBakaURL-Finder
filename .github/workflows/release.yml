@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Require a version tag
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" != refs/tags/v* ]]; then
+            echo "This workflow must run from a v* tag."
+            exit 1
+          fi
+
+      - name: Validate release version
+        id: meta
+        shell: bash
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          manifest_version="$(node -p "require('./manifest.json').version")"
+          tag_name="${GITHUB_REF_NAME}"
+
+          if [[ "${package_version}" != "${manifest_version}" ]]; then
+            echo "package.json version (${package_version}) does not match manifest.json version (${manifest_version})."
+            exit 1
+          fi
+
+          if [[ "${tag_name}" != "v${package_version}" ]]; then
+            echo "Tag ${tag_name} does not match v${package_version}."
+            exit 1
+          fi
+
+          echo "version=${package_version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build release packages
+        run: npm run package:all
+
+      - name: Archive release bundles
+        shell: bash
+        run: |
+          version="${{ steps.meta.outputs.version }}"
+
+          for variant in complete google firefox; do
+            asset="mangabaka-url-finder-v${version}-${variant}.zip"
+
+            (
+              cd "webstore-package-${variant}"
+              zip -r "../${asset}" .
+            )
+          done
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: MangaBaka URL Finder v${{ steps.meta.outputs.version }}
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          files: |
+            mangabaka-url-finder-v${{ steps.meta.outputs.version }}-complete.zip
+            mangabaka-url-finder-v${{ steps.meta.outputs.version }}-google.zip
+            mangabaka-url-finder-v${{ steps.meta.outputs.version }}-firefox.zip
