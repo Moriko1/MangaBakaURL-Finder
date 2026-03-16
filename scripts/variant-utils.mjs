@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync, cpSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync, cpSync, existsSync, readdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 export const VARIANTS = new Set(["complete", "google", "firefox"]);
@@ -11,6 +11,22 @@ export const GENERATED_DIRECTORY_NAMES = [
   "webstore-package-complete",
   "webstore-package-google",
   "webstore-package-firefox",
+];
+export const GENERATED_REPORT_FILE_NAMES = [
+  ".descriptions.xml",
+  "CssReplaceWithShorthandSafely.xml",
+  "CssUnusedSymbol.xml",
+  "ES6MissingAwait.xml",
+  "HtmlUnknownTarget.xml",
+  "JSDeprecatedSymbols.xml",
+  "JSUnresolvedReference.xml",
+  "JSUnusedGlobalSymbols.xml",
+  "PointlessBooleanExpressionJS.xml",
+  "SpellCheckingInspection.xml",
+  "UnnecessaryContinueJS.xml",
+  "index.html",
+  "script.js",
+  "styles.css",
 ];
 
 export function assertVariant(variant) {
@@ -78,15 +94,23 @@ export function cleanGeneratedArtifacts(root) {
   for (const directoryName of GENERATED_DIRECTORY_NAMES) {
     cleanPath(resolve(root, directoryName));
   }
+
+  for (const fileName of GENERATED_REPORT_FILE_NAMES) {
+    cleanPath(resolve(root, fileName));
+  }
+
+  for (const fileName of readdirSync(root)) {
+    if (/^report_.*\.sarif\.json$/i.test(fileName)) {
+      cleanPath(resolve(root, fileName));
+    }
+  }
 }
 
 export function createVariantManifest(variant, manifestContent) {
   const manifest = JSON.parse(manifestContent);
+  manifest.host_permissions = getVariantHostPermissions(variant);
 
   if (variant === "google" || variant === "firefox") {
-    manifest.host_permissions = (manifest.host_permissions ?? []).filter(
-      (permission) => permission !== "https://e-hentai.org/*" && permission !== "https://exhentai.org/*",
-    );
     manifest.version_name = `${manifest.version} (${variant === "google" ? "Google" : "Firefox"})`;
   } else if (variant === "complete") {
     manifest.version_name = `${manifest.version} (Complete)`;
@@ -126,7 +150,7 @@ export function createVariantPopupSource(variant, popupSource) {
 
   next = replaceOrThrow(
     next,
-    /interface LookupResults \{[\s\S]*?\n\}/,
+    /interface LookupResults \{[\s\S]*?\n}/,
     `interface LookupResults {
   atsu: ProviderMatch | null;
   mangadex: ProviderMatch | null;
@@ -139,7 +163,7 @@ export function createVariantPopupSource(variant, popupSource) {
 
   next = replaceOrThrow(
     next,
-    /interface RejectedProviderUrls \{[\s\S]*?\n\}/,
+    /interface RejectedProviderUrls \{[\s\S]*?\n}/,
     `interface RejectedProviderUrls {
   atsu: string[];
   mangadex: string[];
@@ -166,14 +190,14 @@ export function createVariantPopupSource(variant, popupSource) {
 
   next = replaceOrThrow(
     next,
-    /interface EHentaiSearchResult \{[\s\S]*?\r?\n\}\r?\n\r?\n/,
+    /interface EHentaiSearchResult \{[\s\S]*?\r?\n}\r?\n\r?\n/,
     "",
     "EHentaiSearchResult",
   );
 
   next = replaceOrThrow(
     next,
-    /const PROVIDER_KEYS:[\s\S]*?const DEFAULT_SETTINGS: ExtensionSettings = \{[\s\S]*?\n\};/,
+    /const PROVIDER_KEYS:[\s\S]*?const DEFAULT_SETTINGS: ExtensionSettings = \{[\s\S]*?\n};/,
     `const PROVIDER_KEYS: ProviderKey[] = ["atsu", "mangadex", "comixto", "mangafire", "weebcentral"];
 const PROVIDERS: Array<{ key: ProviderKey; label: ProviderMatch["provider"] }> = [
   { key: "atsu", label: "Atsumaru" },
@@ -243,7 +267,7 @@ const DEFAULT_SETTINGS: ExtensionSettings = {
 
   next = replaceOrThrow(
     next,
-    /async function searchProviders\([\s\S]*?\r?\n\}(?=(?:\r?\n){2}async function searchProvider)/,
+    /async function searchProviders\([\s\S]*?\r?\n}(?=(?:\r?\n){2}async function searchProvider)/,
     `async function searchProviders(
   metadata: MangaBakaMetadata,
   rejectedUrls: RejectedProviderUrls,
@@ -262,7 +286,7 @@ const DEFAULT_SETTINGS: ExtensionSettings = {
 
   next = replaceOrThrow(
     next,
-    /async function searchProvider\([\s\S]*?\r?\n\}(?=(?:\r?\n){2}async function searchAtsumaru)/,
+    /async function searchProvider\([\s\S]*?\r?\n}(?=(?:\r?\n){2}async function searchAtsumaru)/,
     `async function searchProvider(
   providerKey: ProviderKey,
   metadata: MangaBakaMetadata,
@@ -374,7 +398,7 @@ const DEFAULT_SETTINGS: ExtensionSettings = {
 
   next = replaceOrThrow(
     next,
-    /\r?\n\s*case "ehentai":\r?\n\s*case "exhentai": \{\r?\n\s*addSelectorText\(\["#gn", "#gj", "h1"\], prioritizedCandidates\);\r?\n\s*break;\r?\n\s*}/,
+    /\r?\n\s*case "ehentai":\r?\n\s*case "exhentai": \{\r?\n\s*addSelectorText\(\["#gn", "#gj", "h1"], prioritizedCandidates\);\r?\n\s*break;\r?\n\s*}/,
     "",
     "provider page EH selectors",
   );
@@ -384,8 +408,28 @@ const DEFAULT_SETTINGS: ExtensionSettings = {
 
 export function getVariantHostPermissions(variant) {
   return variant === "google" || variant === "firefox"
-    ? ["https://mangabaka.org/*", "https://atsu.moe/*", "https://api.mangadex.org/*", "https://search.brave.com/*", "https://search.yahoo.com/*"]
-    : ["https://mangabaka.org/*", "https://atsu.moe/*", "https://api.mangadex.org/*", "https://e-hentai.org/*", "https://exhentai.org/*", "https://search.brave.com/*", "https://search.yahoo.com/*"];
+    ? [
+      "https://mangabaka.org/*",
+      "https://mangadex.org/*",
+      "https://atsu.moe/*",
+      "https://mangafire.to/*",
+      "https://weebcentral.com/*",
+      "https://api.mangadex.org/*",
+      "https://search.brave.com/*",
+      "https://search.yahoo.com/*",
+    ]
+    : [
+      "https://mangabaka.org/*",
+      "https://mangadex.org/*",
+      "https://atsu.moe/*",
+      "https://mangafire.to/*",
+      "https://weebcentral.com/*",
+      "https://api.mangadex.org/*",
+      "https://e-hentai.org/*",
+      "https://exhentai.org/*",
+      "https://search.brave.com/*",
+      "https://search.yahoo.com/*",
+    ];
 }
 
 export function copyVariantAssets(variant, root, targetAssetsDir) {

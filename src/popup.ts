@@ -118,6 +118,7 @@ type ProviderLabelMode = ExtensionSettings["providerLabelMode"];
 type LinkTargetType = "current" | "new";
 type OptionsPanelTab = "providers" | "extension" | "info";
 type MangaBakaButtonTarget = "root" | "library" | "profile";
+type MangaDexStatusIconKey = "slight-smile" | "melting-face" | "clown-face" | "pensive";
 type StatusTone = "idle" | "loading" | "success" | "error";
 type PopupViewState = "unsupported" | "invalid" | "loading" | "lookup" | "provider" | "error";
 
@@ -300,13 +301,59 @@ const SAVE_READ_LINK_ICON = `
 `;
 
 const ENGLISH_FLAG_ICON = `
-  <svg viewBox="0 0 24 16" aria-hidden="true">
-    <rect width="24" height="16" rx="2" fill="#ffffff"></rect>
-    <path d="M0 1.33h24M0 4h24M0 6.67h24M0 9.33h24M0 12h24M0 14.67h24" stroke="#c53030" stroke-width="1.33"></path>
-    <rect width="10" height="7.5" fill="#2557a7"></rect>
-    <rect width="24" height="16" rx="2" fill="none" stroke="rgba(0,0,0,0.18)"></rect>
+  <svg viewBox="0 0 36 36" class="provider-value-flag-icon" aria-hidden="true">
+    <path d="M35.445 7C34.752 5.809 33.477 5 32 5H18v2h17.445zM0 25h36v2H0zm18-8h18v2H18zm0-4h18v2H18zM0 21h36v2H0zm4 10h28c1.477 0 2.752-.809 3.445-2H.555c.693 1.191 1.968 2 3.445 2zM18 9h18v2H18z" fill="#B22334"></path>
+    <path d="M.068 27.679c.017.093.036.186.059.277.026.101.058.198.092.296.089.259.197.509.333.743L.555 29h34.89l.002-.004c.135-.233.243-.483.332-.741.034-.099.067-.198.093-.301.023-.09.042-.182.059-.275.041-.22.069-.446.069-.679H0c0 .233.028.458.068.679zM0 23h36v2H0zm0-4v2h36v-2H18zm18-4h18v2H18zm0-4h18v2H18zM0 9c0-.233.03-.457.068-.679C.028 8.542 0 8.767 0 9zm.555-2l-.003.005L.555 7zM.128 8.044c.025-.102.06-.199.092-.297-.034.098-.066.196-.092.297zM18 9h18c0-.233-.028-.459-.069-.68-.017-.092-.035-.184-.059-.274-.027-.103-.059-.203-.094-.302-.089-.258-.197-.507-.332-.74.001-.001 0-.003-.001-.004H18v2z" fill="#EEE"></path>
+    <path d="M18 5H4C1.791 5 0 6.791 0 9v10h18V5z" fill="#3C3B6E"></path>
+    <path d="m2.001 7.726.618.449-.236.725L3 8.452l.618.448-.236-.725L4 7.726h-.764L3 7l-.235.726zm2 2 .618.449-.236.725.617-.448.618.448-.236-.725L6 9.726h-.764L5 9l-.235.726zm4 0 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L9 9l-.235.726zm4 0 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L13 9l-.235.726zm-8 4 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L5 13l-.235.726zm4 0 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L9 13l-.235.726zm4 0 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L13 13l-.235.726zm-6-6 .618.449-.236.725L7 8.452l.618.448-.236-.725L8 7.726h-.764L7 7l-.235.726zm4 0 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L11 7l-.235.726zm4 0 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L15 7l-.235.726zm-12 4 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L3 11l-.235.726zM6.383 12.9 7 12.452l.618.448-.236-.725.618-.449h-.764L7 11l-.235.726h-.764l.618.449zm3.618-1.174.618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L11 11l-.235.726zm4 0 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L15 11l-.235.726zm-12 4 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L3 15l-.235.726zM6.383 16.9 7 16.452l.618.448-.236-.725.618-.449h-.764L7 15l-.235.726h-.764l.618.449zm3.618-1.174.618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L11 15l-.235.726zm4 0 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L15 15l-.235.726z" fill="#FFF"></path>
   </svg>
 `;
+
+const MANGADEX_STATUS_ICON_MARKUP: Record<MangaDexStatusIconKey, string> = {
+  "slight-smile": `
+    <svg viewBox="0 0 36 36" aria-hidden="true">
+      <circle cx="18" cy="18" r="18" fill="#FFCC4D"></circle>
+      <path d="M10.515 23.621C10.56 23.8 11.683 28 18 28c6.318 0 7.44-4.2 7.485-4.379.055-.217-.043-.442-.237-.554-.195-.111-.439-.078-.6.077C24.629 23.163 22.694 25 18 25s-6.63-1.837-6.648-1.855C11.256 23.05 11.128 23 11 23c-.084 0-.169.021-.246.064-.196.112-.294.339-.239.557z" fill="#664500"></path>
+      <ellipse cx="12" cy="13.5" rx="2.5" ry="3.5" fill="#664500"></ellipse>
+      <ellipse cx="24" cy="13.5" rx="2.5" ry="3.5" fill="#664500"></ellipse>
+    </svg>
+  `,
+  "melting-face": `
+    <svg viewBox="0 0 36 36" aria-hidden="true">
+      <path d="M35.07 32.558a1.92 1.92 0 0 0 .836-2.241c-.259-.81-1.07-1.317-1.921-1.317H32a1 1 0 0 1 0-2h1.5a1.5 1.5 0 1 0-.04-3c-.8.021-1.46-.623-1.46-1.423v-.003c0-.293.06-.578.176-.847a15.294 15.294 0 0 0 1.294-7.191C32.978 6.66 26.411.269 18.524.009 9.724-.281 2.5 6.766 2.5 15.5c0 2.371.548 4.609 1.5 6.619v1.88c0 1.086-.865 2.021-1.951 2a2 2 0 0 0-2.034 2.167C.101 29.225 1.069 30 2.133 30h8.039A1.17 1.17 0 0 1 11 32l-3.03.757a1.281 1.281 0 0 0 0 2.485c1.932.483 3.914.737 5.905.756l2.712.026c1.406.014 2.803-.31 4.029-1a8.289 8.289 0 0 1 5.642-.913c3.028.588 6.167.034 8.812-1.553z" fill="#FFCC4D"></path>
+      <path d="M18.736 24.003c-.754 0-1.504-.078-2.244-.234-2.693-.571-5.003-2.115-6.338-4.236a1 1 0 0 1 1.692-1.066c1.033 1.642 2.925 2.892 5.06 3.345 1.767.375 4.507.393 7.536-1.642a1 1 0 0 1 1.116 1.66c-2.129 1.43-4.489 2.173-6.822 2.173z" fill="#65471B"></path>
+      <ellipse cx="14" cy="12" rx="2" ry="3" fill="#65471B"></ellipse>
+      <ellipse cx="23" cy="14" rx="2" ry="3" fill="#65471B"></ellipse>
+    </svg>
+  `,
+  "clown-face": `
+    <svg viewBox="0 0 36 36" aria-hidden="true">
+      <circle cx="29" cy="3" r="2" fill="#4289C1"></circle>
+      <circle cx="33" cy="8" r="3" fill="#4289C1"></circle>
+      <circle cx="33" cy="4" r="3" fill="#4289C1"></circle>
+      <circle cx="7" cy="3" r="2" fill="#4289C1"></circle>
+      <circle cx="3" cy="8" r="3" fill="#4289C1"></circle>
+      <circle cx="3" cy="4" r="3" fill="#4289C1"></circle>
+      <path d="M36 18c0 9.941-8.059 18-18 18S0 27.941 0 18 8.059 0 18 0s18 8.059 18 18" fill="#FEE7B8"></path>
+      <circle cx="30.5" cy="4.5" r="2.5" fill="#4289C1"></circle>
+      <circle cx="32" cy="7" r="2" fill="#4289C1"></circle>
+      <circle cx="5.5" cy="4.5" r="2.5" fill="#4289C1"></circle>
+      <circle cx="4" cy="7" r="2" fill="#4289C1"></circle>
+      <circle cx="6.93" cy="21" r="4" fill="#FF7892"></circle>
+      <circle cx="28.93" cy="21" r="4" fill="#FF7892"></circle>
+      <path d="M27.335 23.629c-.178-.161-.444-.171-.635-.029-.039.029-3.922 2.9-8.7 2.9-4.766 0-8.662-2.871-8.7-2.9-.191-.142-.457-.13-.635.029-.177.16-.217.424-.094.628C8.7 24.472 11.788 31 18 31s9.301-6.528 9.429-6.743c.123-.205.084-.468-.094-.628z" fill="#DA2F47"></path>
+      <ellipse cx="11.5" cy="11.5" rx="2.5" ry="3.5" fill="#664500"></ellipse>
+      <ellipse cx="25.5" cy="11.5" rx="2.5" ry="3.5" fill="#664500"></ellipse>
+      <circle cx="18.5" cy="19.5" r="3.5" fill="#BB1A34"></circle>
+    </svg>
+  `,
+  pensive: `
+    <svg viewBox="0 0 36 36" aria-hidden="true">
+      <path d="M36 18c0 9.941-8.059 18-18 18-9.94 0-18-8.059-18-18C0 8.06 8.06 0 18 0c9.941 0 18 8.06 18 18" fill="#FFCC4D"></path>
+      <path d="M17.312 17.612c-.176-.143-.427-.147-.61-.014-.012.009-1.26.902-3.702.902-2.441 0-3.69-.893-3.7-.9-.183-.137-.435-.133-.611.009-.178.142-.238.386-.146.594.06.135 1.5 3.297 4.457 3.297 2.958 0 4.397-3.162 4.457-3.297.092-.207.032-.449-.145-.591zm10 0c-.176-.143-.426-.148-.61-.014-.012.009-1.261.902-3.702.902-2.44 0-3.69-.893-3.7-.9-.183-.137-.434-.133-.611.009-.178.142-.238.386-.146.594.06.135 1.5 3.297 4.457 3.297 2.958 0 4.397-3.162 4.457-3.297.092-.207.032-.449-.145-.591zM22 28h-8c-.552 0-1-.447-1-1s.448-1 1-1h8c.553 0 1 .447 1 1s-.447 1-1 1zM6 14c-.552 0-1-.448-1-1 0-.551.445-.998.996-1 .156-.002 3.569-.086 6.205-3.6.331-.44.957-.532 1.4-.2.442.331.531.958.2 1.4C10.538 13.95 6.184 14 6 14zm24 0c-.184 0-4.537-.05-7.8-4.4-.332-.442-.242-1.069.2-1.4.441-.333 1.067-.242 1.399.2 2.641 3.521 6.061 3.599 6.206 3.6.55.006.994.456.991 1.005-.002.551-.446.995-.996.995z" fill="#664500"></path>
+    </svg>
+  `,
+};
 
 const INCORRECT_ICON = `
   <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -708,13 +755,14 @@ function renderMangaDexPurgeStat(): void {
   const { purgedCount, totalCount } = currentMangaDexPurgeStats;
   const hasStats = totalCount > 0;
   const percentage = hasStats ? (purgedCount / totalCount) * 100 : null;
-  const emoji = getMangaDexPurgeEmoji(percentage ?? -1);
+  const iconKey = getMangaDexPurgeIconKey(percentage ?? -1);
 
-  purgeStatButton.textContent = hasStats
+  const label = hasStats
     ? currentMangaDexPurgeStatFormat === "fraction"
-      ? `${purgedCount}/${totalCount} ${emoji}`
-      : `${formatPercentage(purgedCount, totalCount)} ${emoji}`
+      ? `${purgedCount}/${totalCount}`
+      : `${formatPercentage(purgedCount, totalCount)}`
     : "N/A";
+  setInfoPanelToggleContent(purgeStatButton, label, hasStats ? iconKey : null);
   purgeStatButton.disabled = !hasStats;
   purgeStatButton.title = hasStats
     ? currentMangaDexPurgeStatFormat === "fraction"
@@ -729,7 +777,7 @@ function renderCachedSeriesStat(): void {
   const { seriesCount, totalBytes } = currentCacheSeriesStats;
   const isShowingSize = currentCacheSeriesStatFormat === "size";
 
-  cacheSeriesStatButton.textContent = isShowingSize ? formatByteSize(totalBytes) : `${seriesCount} series`;
+  cacheSeriesStatButton.textContent = isShowingSize ? formatByteSize(totalBytes) : `${seriesCount} Series`;
   cacheSeriesStatButton.disabled = false;
   cacheSeriesStatButton.title = isShowingSize ? "Click to show the cached series count" : "Click to show the cache size";
   cacheSeriesStatButton.setAttribute("aria-label", cacheSeriesStatButton.title);
@@ -771,34 +819,39 @@ function formatPercentage(numerator: number, denominator: number): string {
   return `${percentage % 1 === 0 ? percentage.toFixed(0) : percentage.toFixed(1)}%`;
 }
 
-function getMangaDexPurgeEmoji(percentage: number): string {
+function getMangaDexPurgeIconKey(percentage: number): MangaDexStatusIconKey | null {
   if (percentage < 0) {
-    return "";
+    return null;
   }
 
   if (percentage === 0) {
-    return "\u{1F642}";
+    return "slight-smile";
   }
 
   if (percentage < 50) {
-    return "\u{1FAE0}";
+    return "melting-face";
   }
 
-  return "\u{1F921}";
+  return "clown-face";
+}
 
-  if (percentage === 0) {
-    return "😐";
+function createStatusIconSvg(className: string, iconKey: MangaDexStatusIconKey): SVGSVGElement {
+  const template = document.createElement("template");
+  template.innerHTML = MANGADEX_STATUS_ICON_MARKUP[iconKey].trim();
+  const icon = template.content.firstElementChild;
+  if (!(icon instanceof SVGSVGElement)) {
+    throw new Error(`Missing SVG markup for status icon: ${iconKey}`);
   }
+  icon.classList.add(className);
+  return icon;
+}
 
-  if (percentage <= 25) {
-    return "😬";
+function setInfoPanelToggleContent(button: HTMLButtonElement, text: string, iconKey: MangaDexStatusIconKey | null): void {
+  const children: Node[] = [document.createTextNode(text)];
+  if (iconKey) {
+    children.push(createStatusIconSvg("info-panel-toggle-icon", iconKey));
   }
-
-  if (percentage < 50) {
-    return "🫠";
-  }
-
-  return "🤡";
+  button.replaceChildren(...children);
 }
 
 function formatByteSize(bytes: number): string {
@@ -1165,7 +1218,7 @@ async function fetchProviderDocument(sourceUrl: string): Promise<Document | null
 }
 
 function parseAtsumaruEmbeddedTitles(scriptText: string): string[] {
-  const match = scriptText.match(/window\.mangaPage\s*=\s*(\{[\s\S]*?\});/);
+  const match = scriptText.match(/window\.mangaPage\s*=\s*(\{[\s\S]*?});/);
   if (!match) {
     return [];
   }
@@ -1222,7 +1275,6 @@ function getSeriesTitlesFromAnchors(documentNode: Document, pathPattern: RegExp)
         titles.push(hyphenatedTitleToText(slug));
       }
     } catch {
-      continue;
     }
   }
 
@@ -1753,7 +1805,6 @@ async function extractProviderPageMetadataFromActiveTab(
                 candidates.push(text);
               }
             } catch {
-              continue;
             }
           }
         };
@@ -1771,7 +1822,7 @@ async function extractProviderPageMetadataFromActiveTab(
             .filter(Boolean);
 
           for (const scriptText of scriptTexts) {
-            const match = scriptText.match(/window\.mangaPage\s*=\s*(\{[\s\S]*?\});/);
+            const match = scriptText.match(/window\.mangaPage\s*=\s*(\{[\s\S]*?});/);
             if (!match) {
               continue;
             }
@@ -1795,7 +1846,6 @@ async function extractProviderPageMetadataFromActiveTab(
                 return titles;
               }
             } catch {
-              continue;
             }
           }
 
@@ -1845,7 +1895,6 @@ async function extractProviderPageMetadataFromActiveTab(
                 }
               }
             } catch {
-              continue;
             }
           }
 
@@ -2221,7 +2270,6 @@ async function extractMetadataFromActiveTab(): Promise<ExtractedMetadataPayload 
               return { titles, authors: asAuthorNames(data.author) };
             }
           } catch {
-            continue;
           }
         }
 
@@ -2264,7 +2312,6 @@ function extractMetadataFromHtml(html: string): ExtractedMetadataPayload | null 
         return { titles, authors: asAuthorNames(data.author) };
       }
     } catch {
-      continue;
     }
   }
 
@@ -2529,7 +2576,6 @@ async function searchEHentai(
 
       html = await response.text();
     } catch {
-      continue;
     }
 
     const searchResults = extractEHentaiSearchResults(html, domain);
@@ -2600,7 +2646,7 @@ async function searchMangaFire(metadata: MangaBakaMetadata, rejectedUrls: string
         return getMangaFireTitleFromUrl(url) || cleanMangaFireResultTitle(result.title) || "MangaFire";
       },
     })) ??
-    searchViaBrave(metadata, rejectedUrls, titleIndex, {
+    (await searchViaBrave(metadata, rejectedUrls, titleIndex, {
       provider: "MangaFire",
       siteQuery: "site:mangafire.to/manga",
       matchUrl(url) {
@@ -2623,7 +2669,7 @@ async function searchMangaFire(metadata: MangaBakaMetadata, rejectedUrls: string
       getDisplayTitle(result, url) {
         return getMangaFireTitleFromUrl(url) || cleanMangaFireResultTitle(result.title) || "MangaFire";
       },
-    })
+    }))
   );
 }
 
@@ -2653,7 +2699,7 @@ async function searchWeebCentral(metadata: MangaBakaMetadata, rejectedUrls: stri
         return getWeebCentralTitleFromUrl(url) || cleanWeebCentralResultTitle(result.title) || "WeebCentral";
       },
     })) ??
-    searchViaBrave(metadata, rejectedUrls, titleIndex, {
+    (await searchViaBrave(metadata, rejectedUrls, titleIndex, {
       provider: "WeebCentral",
       siteQuery: "site:weebcentral.com/series",
       matchUrl(url) {
@@ -2676,7 +2722,7 @@ async function searchWeebCentral(metadata: MangaBakaMetadata, rejectedUrls: stri
       getDisplayTitle(result, url) {
         return getWeebCentralTitleFromUrl(url) || cleanWeebCentralResultTitle(result.title) || "WeebCentral";
       },
-    })
+    }))
   );
 }
 
@@ -2939,8 +2985,8 @@ function canonicalizeEHentaiGalleryUrl(url: URL, domain: "e-hentai" | "exhentai"
 
 function cleanEHentaiGalleryTitle(title: string): string {
   return title
-    .replace(/^\s*(\[[^\]]+\]\s*)+/, "")
-    .replace(/\s*(\[[^\]]+\]\s*)+$/, "")
+    .replace(/^\s*(\[[^]]+]\s*)+/, "")
+    .replace(/\s*(\[[^]]+]\s*)+$/, "")
     .replace(/\s+\|\s+.+$/, "")
     .trim();
 }
@@ -3472,7 +3518,8 @@ function renderProviderRows(
       }
     } else if (providerResult) {
       if (provider.key === "mangadex") {
-        meta.innerHTML = `${ENGLISH_FLAG_ICON}<span>Purged 😔</span>`;
+        meta.innerHTML = `${ENGLISH_FLAG_ICON}<span>Purged</span>`;
+        meta.append(createStatusIconSvg("provider-value-status-icon", "pensive"));
         if (isManuallyPurgedMangaDexResult(providerResult)) {
           meta.onclick = () => {
             void toggleMangaDexPurgedState();
@@ -4348,7 +4395,7 @@ async function saveReadLink(providerKey: ProviderKey, url: string, providerLabel
           return null;
         };
 
-        let input: HTMLInputElement | HTMLTextAreaElement | null = null;
+        let input: HTMLInputElement | HTMLTextAreaElement | null;
         let opener: HTMLElement | null = null;
         input = findReadLinkInput();
         if (!input) {
@@ -4407,7 +4454,8 @@ async function saveReadLink(providerKey: ProviderKey, url: string, providerLabel
 
     const result = results?.[0]?.result as { ok: boolean; error?: string } | undefined;
     if (!result?.ok) {
-      throw new Error(result?.error ?? "Unable to save MangaBaka Read Link.");
+      setStatus(result?.error ?? "Unable to save MangaBaka Read Link.", "error");
+      return;
     }
 
     delete armedReadLinkSaves[providerKey];
@@ -4866,3 +4914,4 @@ function getConfirmMessageNode(): HTMLElement {
 function getResetButton(): HTMLButtonElement {
   return document.getElementById("reset-button") as HTMLButtonElement;
 }
+

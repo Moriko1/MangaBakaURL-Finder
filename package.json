@@ -1,6 +1,6 @@
 {
   "name": "mangabaka-url-finder",
-  "version": "1.4.2",
+  "version": "1.4.4",
   "description": "Find matching provider URLs for MangaBaka and search MangaBaka from supported provider pages.",
   "license": "SEE LICENSE IN LICENSE",
   "main": "dist/background.js",
@@ -16,8 +16,8 @@
     "package:firefox": "node scripts/package-variant.mjs firefox",
     "package:all": "npm run package:complete && npm run package:google && npm run package:firefox"
   },
-  "dependencies": {},
   "devDependencies": {
+    "@types/node": "^25.5.0",
     "typescript": "^5.5.3"
   },
   "private": true

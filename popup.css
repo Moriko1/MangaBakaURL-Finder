@@ -99,6 +99,8 @@ h1 {
   word-break: break-word;
 }
 
+/* These selectors are applied from popup.ts at runtime. */
+/*noinspection CssUnusedSymbol*/
 h1.title--inactive {
   font-size: 42px;
   line-height: 0.92;
@@ -117,8 +119,7 @@ h1.title--inactive {
 .options-panel {
   display: grid;
   gap: 10px;
-  margin-bottom: 14px;
-  padding: 12px;
+  padding: 0 12px;
   border: 1px solid var(--border);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.05);
@@ -134,16 +135,13 @@ h1.title--inactive {
   max-height: 0;
   overflow: hidden;
   margin-bottom: 0;
-  padding-top: 0;
-  padding-bottom: 0;
 }
 
 .options-panel[data-open="true"] {
   opacity: 1;
   max-height: 1200px;
   margin-bottom: 14px;
-  padding-top: 12px;
-  padding-bottom: 12px;
+  padding: 12px;
 }
 
 .options-tabs {
@@ -270,6 +268,7 @@ h1.title--inactive {
   background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.18) 18%, rgba(240, 165, 74, 0.4) 50%, rgba(255, 255, 255, 0.18) 82%, transparent 100%);
 }
 
+/*noinspection CssUnusedSymbol*/
 .provider-row {
   display: grid;
   grid-template-columns: minmax(76px, auto) 1fr auto;
@@ -282,10 +281,12 @@ h1.title--inactive {
   box-shadow: var(--shadow);
 }
 
+/*noinspection CssUnusedSymbol*/
 .provider-row--loading {
   opacity: 0.82;
 }
 
+/*noinspection CssUnusedSymbol*/
 .provider-label {
   display: flex;
   gap: 6px;
@@ -294,15 +295,18 @@ h1.title--inactive {
   min-width: 0;
 }
 
+/*noinspection CssUnusedSymbol*/
 .provider-label--titles {
   align-items: center;
 }
 
+/*noinspection CssUnusedSymbol*/
 .provider-label--icons {
   justify-content: center;
   align-items: center;
 }
 
+/*noinspection CssUnusedSymbol*/
 .provider-label--stacked {
   flex-direction: column;
   justify-content: center;
@@ -324,6 +328,7 @@ h1.title--inactive {
   word-break: break-word;
 }
 
+/*noinspection CssUnusedSymbol*/
 .provider-value {
   display: flex;
   flex-direction: column;
@@ -349,12 +354,13 @@ h1.title--inactive {
   font-size: 12px;
 }
 
-.provider-value-meta svg {
+.provider-value-meta .provider-value-flag-icon {
   flex: 0 0 auto;
-  width: 18px;
-  height: 12px;
+  width: 26px;
+  height: 18px;
 }
 
+/*noinspection CssUnusedSymbol*/
 .provider-value--na {
   justify-content: center;
   text-align: center;
@@ -364,6 +370,7 @@ h1.title--inactive {
   justify-content: center;
 }
 
+/*noinspection CssUnusedSymbol*/
 .provider-actions {
   display: flex;
   gap: 8px;
@@ -402,6 +409,7 @@ h1.title--inactive {
   cursor: default;
 }
 
+/*noinspection CssUnusedSymbol*/
 .action-button--search {
   color: var(--accent-strong);
   border-color: rgba(240, 165, 74, 0.42);
@@ -419,6 +427,7 @@ h1.title--inactive {
   border-color: rgba(216, 79, 79, 0.58);
 }
 
+/*noinspection CssUnusedSymbol*/
 .action-button--confirm {
   box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.18);
   background: rgba(216, 79, 79, 0.28);
@@ -487,23 +496,27 @@ h1.title--inactive {
   border-color: rgba(216, 79, 79, 0.58);
 }
 
+/*noinspection CssUnusedSymbol*/
 .icon-button--retry {
   color: rgb(129, 211, 74);
   border-color: rgba(129, 211, 74, 0.42);
   background: rgba(129, 211, 74, 0.1);
 }
 
+/*noinspection CssUnusedSymbol*/
 .icon-button--save-read-link {
   color: rgb(52, 170, 228);
   border-color: rgba(52, 170, 228, 0.52);
   background: rgba(52, 170, 228, 0.16);
 }
 
+/*noinspection CssUnusedSymbol*/
 .icon-button--save-read-link:hover:enabled {
   background: rgba(52, 170, 228, 0.24);
   border-color: rgba(52, 170, 228, 0.68);
 }
 
+/*noinspection CssUnusedSymbol*/
 .icon-button--confirm {
   box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.18);
   background: rgba(216, 79, 79, 0.28);
@@ -548,6 +561,7 @@ h1.title--inactive {
 .info-panel-toggle {
   display: inline-flex;
   align-items: center;
+  gap: 6px;
   width: fit-content;
   padding: 0;
   border: 0;
@@ -563,6 +577,19 @@ h1.title--inactive {
 .info-panel-toggle:disabled {
   color: var(--muted);
   cursor: default;
+}
+
+.info-panel-toggle-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  object-fit: contain;
+}
+
+.provider-value-meta .provider-value-status-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
 }
 
 .confirm-panel {
