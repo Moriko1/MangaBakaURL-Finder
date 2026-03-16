@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "MangaBaka URL Finder",
-  "version": "1.1.2",
+  "version": "1.4.4",
   "description": "Find matching Atsumaru and MangaDex (and more) URLs for MangaBaka.",
   "permissions": ["storage", "tabs", "scripting"],
   "host_permissions": [
@@ -34,5 +34,20 @@
     },
     "default_popup": "popup.html",
     "default_title": "MangaBaka URL Finder"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "assets/icon-color-16.png",
+        "assets/icon-color-32.png",
+        "assets/icon-color-48.png",
+        "assets/icon-color-128.png",
+        "assets/icon-gray-16.png",
+        "assets/icon-gray-32.png",
+        "assets/icon-gray-48.png",
+        "assets/icon-gray-128.png"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }

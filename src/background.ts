@@ -52,11 +52,17 @@ async function loadIconSet(assetPaths: Record<number, string>): Promise<Record<n
 
 function getActionIconImageData(isActive: boolean): Promise<Record<number, ImageData>> {
   if (isActive) {
-    activeIconImageDataPromise ??= loadIconSet(ACTIVE_ICON_ASSET_PATHS);
+    activeIconImageDataPromise ??= loadIconSet(ACTIVE_ICON_ASSET_PATHS).catch((error) => {
+      activeIconImageDataPromise = null;
+      throw error;
+    });
     return activeIconImageDataPromise;
   }
 
-  inactiveIconImageDataPromise ??= loadIconSet(INACTIVE_ICON_ASSET_PATHS);
+  inactiveIconImageDataPromise ??= loadIconSet(INACTIVE_ICON_ASSET_PATHS).catch((error) => {
+    inactiveIconImageDataPromise = null;
+    throw error;
+  });
   return inactiveIconImageDataPromise;
 }
 
@@ -118,7 +124,7 @@ async function loadEnabledProviders(): Promise<typeof BACKGROUND_DEFAULT_ENABLED
 async function updateActionForTab(tabId: number, url?: string): Promise<void> {
   const enabledProviders = await loadEnabledProviders();
   const providerKey = getProviderKeyForUrl(url);
-  const isActive = isMangabakaUrl(url) || (providerKey != null && enabledProviders[providerKey] === true);
+  const isActive = isMangabakaUrl(url) || (providerKey != null && enabledProviders[providerKey]);
   try {
     await chrome.action.setIcon({
       tabId,
@@ -147,14 +153,17 @@ async function refreshAllTabs(): Promise<void> {
 
 void refreshAllTabs();
 
+// noinspection JSDeprecatedSymbols
 chrome.runtime.onInstalled.addListener(() => {
   void refreshAllTabs();
 });
 
+// noinspection JSDeprecatedSymbols
 chrome.runtime.onStartup.addListener(() => {
   void refreshAllTabs();
 });
 
+// noinspection JSDeprecatedSymbols
 chrome.tabs.onActivated.addListener(async ({ tabId }: { tabId: number }) => {
   try {
     const tab = await chrome.tabs.get(tabId);
@@ -166,18 +175,21 @@ chrome.tabs.onActivated.addListener(async ({ tabId }: { tabId: number }) => {
   }
 });
 
+// noinspection JSDeprecatedSymbols
 chrome.tabs.onUpdated.addListener((tabId: number, changeInfo: { url?: string; status?: string }, tab: { url?: string }) => {
   if (changeInfo.url || changeInfo.status === "complete") {
     void updateActionForTab(tabId, changeInfo.url ?? tab.url);
   }
 });
 
+// noinspection JSDeprecatedSymbols
 chrome.storage.onChanged.addListener((changes: Record<string, { newValue?: unknown }>, areaName: string) => {
   if (areaName === "local" && BACKGROUND_SETTINGS_KEY in changes) {
     void refreshAllTabs();
   }
 });
 
+// noinspection JSDeprecatedSymbols
 chrome.runtime.onMessage.addListener((message: { type?: string; tabId?: number; url?: string }) => {
   if (message.type === "sync-action-icon" && typeof message.tabId === "number") {
     void updateActionForTab(message.tabId, message.url);

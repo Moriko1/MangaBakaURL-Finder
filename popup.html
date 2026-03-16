@@ -128,8 +128,30 @@
         </section>
 
         <section id="options-panel-info" class="options-tab-panel options-tab-panel--info" role="tabpanel" hidden>
-          <p class="info-panel-label">Version Name</p>
-          <p id="info-version" class="info-panel-value">Loading...</p>
+          <div class="info-panel-row">
+            <p id="info-version-label" class="info-panel-label">Version Name</p>
+            <button id="info-version" class="info-panel-toggle" type="button">Loading...</button>
+          </div>
+          <div class="info-panel-row">
+            <p class="info-panel-label">Install Source</p>
+            <a id="info-install-source" class="info-panel-link" href="https://github.com/Moriko1/MangaBakaURL-Finder" target="_blank" rel="noreferrer">Loading...</a>
+          </div>
+          <div class="info-panel-row">
+            <p class="info-panel-label">Developer</p>
+            <a class="info-panel-link" href="https://github.com/Moriko1/MangaBakaURL-Finder" target="_blank" rel="noreferrer">Spooky ↗</a>
+          </div>
+          <div class="info-panel-row">
+            <p class="info-panel-label">Cache Size</p>
+            <button id="info-cached-series-stat" class="info-panel-toggle" type="button">Loading...</button>
+          </div>
+          <div id="info-mangadex-purge-row" class="info-panel-row">
+            <p class="info-panel-label">MangaDex Purge Ratio</p>
+            <button id="info-mangadex-purge-stat" class="info-panel-toggle" type="button">Loading...</button>
+          </div>
+          <hr class="option-separator" />
+          <div class="info-panel-row info-panel-row--button">
+            <button id="info-reset-extension-button" class="action-button action-button--danger" type="button">Reset Extension</button>
+          </div>
         </section>
       </section>
 
@@ -142,8 +164,53 @@
       <footer class="status-bar">
         <p id="status" data-tone="idle">Waiting...</p>
       </footer>
+
+      <template id="inspection-runtime-selectors">
+        <h1 class="title--inactive">Inactive</h1>
+        <section class="provider-row provider-row--loading">
+          <div class="provider-label provider-label--titles provider-label--icons provider-label--stacked">
+            <img
+              class="provider-label-logo"
+              src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+              alt=""
+            />
+            <span class="provider-label-text">Provider</span>
+          </div>
+          <div class="provider-value provider-value--na">
+            <span class="provider-value-main">N/A</span>
+            <span class="provider-value-meta">
+              Meta
+              <img
+                class="provider-value-flag-icon"
+                src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+                alt=""
+              />
+              <img
+                class="provider-value-status-icon"
+                src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+                alt=""
+              />
+            </span>
+          </div>
+          <div class="provider-actions">
+            <button class="action-button action-button--search action-button--confirm" type="button">Search</button>
+            <button class="icon-button icon-button--retry icon-button--save-read-link icon-button--confirm" type="button" aria-label="Action"></button>
+          </div>
+        </section>
+        <button class="info-panel-toggle" type="button">
+          Value
+          <img
+            class="info-panel-toggle-icon"
+            src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+            alt=""
+          />
+        </button>
+      </template>
     </main>
 
+    <!--suppress HtmlUnknownTarget -->
+    <script src="dist/build-info.js"></script>
+    <!--suppress HtmlUnknownTarget -->
     <script src="dist/popup.js"></script>
   </body>
 </html>

@@ -12,6 +12,7 @@ interface ProviderMatch {
   url: string;
   latestChapterNumber: string | null;
   latestChapterLanguage: "en" | null;
+  manualPurgedChapterNumber?: string | null;
 }
 
 interface LookupResults {
@@ -117,6 +118,7 @@ type ProviderLabelMode = ExtensionSettings["providerLabelMode"];
 type LinkTargetType = "current" | "new";
 type OptionsPanelTab = "providers" | "extension" | "info";
 type MangaBakaButtonTarget = "root" | "library" | "profile";
+type MangaDexStatusIconKey = "slight-smile" | "melting-face" | "clown-face" | "pensive";
 type StatusTone = "idle" | "loading" | "success" | "error";
 type PopupViewState = "unsupported" | "invalid" | "loading" | "lookup" | "provider" | "error";
 
@@ -132,9 +134,26 @@ interface ProviderPageContext {
 
 interface PendingConfirmation {
   button: HTMLButtonElement;
-  message: string;
+  messages: string[];
+  messageIndex: number;
   action: () => Promise<void> | void;
+  activeClassName: string;
   timeoutId: number;
+}
+
+interface InstallSourceInfo {
+  label: string;
+  url: string | null;
+}
+
+interface MangaDexPurgeStats {
+  purgedCount: number;
+  totalCount: number;
+}
+
+interface CacheSeriesStats {
+  seriesCount: number;
+  totalBytes: number;
 }
 
 class InvalidMangaBakaPageError extends Error {
@@ -146,6 +165,7 @@ class InvalidMangaBakaPageError extends Error {
 
 const CACHE_VERSION = 9;
 const SETTINGS_KEY = "extension:settings";
+const LOCAL_INSTALL_SOURCE_URL = "https://github.com/Moriko1/MangaBakaURL-Finder";
 const PROVIDER_KEYS: ProviderKey[] = ["atsu", "mangadex", "ehentai", "exhentai", "comixto", "mangafire", "weebcentral"];
 const PROVIDERS: Array<{ key: ProviderKey; label: ProviderMatch["provider"] }> = [
   { key: "atsu", label: "Atsumaru" },
@@ -219,7 +239,9 @@ const DEFAULT_SETTINGS: ExtensionSettings = {
   mangaBakaButtonTarget: DEFAULT_MANGABAKA_BUTTON_TARGET,
   mangaBakaProfileName: "",
 };
-const EXTENSION_VERSION_NAME = chrome.runtime.getManifest().version_name ?? chrome.runtime.getManifest().version;
+const EXTENSION_MANIFEST = chrome.runtime.getManifest();
+const EXTENSION_VERSION_NAME = EXTENSION_MANIFEST.version_name ?? EXTENSION_MANIFEST.version;
+const EXTENSION_BUILD_DATE = (globalThis as typeof globalThis & { BUILD_DATE?: string }).BUILD_DATE ?? "Unknown";
 
 const COPY_ICON = `
   <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -279,13 +301,59 @@ const SAVE_READ_LINK_ICON = `
 `;
 
 const ENGLISH_FLAG_ICON = `
-  <svg viewBox="0 0 24 16" aria-hidden="true">
-    <rect width="24" height="16" rx="2" fill="#ffffff"></rect>
-    <path d="M0 1.33h24M0 4h24M0 6.67h24M0 9.33h24M0 12h24M0 14.67h24" stroke="#c53030" stroke-width="1.33"></path>
-    <rect width="10" height="7.5" fill="#2557a7"></rect>
-    <rect width="24" height="16" rx="2" fill="none" stroke="rgba(0,0,0,0.18)"></rect>
+  <svg viewBox="0 0 36 36" class="provider-value-flag-icon" aria-hidden="true">
+    <path d="M35.445 7C34.752 5.809 33.477 5 32 5H18v2h17.445zM0 25h36v2H0zm18-8h18v2H18zm0-4h18v2H18zM0 21h36v2H0zm4 10h28c1.477 0 2.752-.809 3.445-2H.555c.693 1.191 1.968 2 3.445 2zM18 9h18v2H18z" fill="#B22334"></path>
+    <path d="M.068 27.679c.017.093.036.186.059.277.026.101.058.198.092.296.089.259.197.509.333.743L.555 29h34.89l.002-.004c.135-.233.243-.483.332-.741.034-.099.067-.198.093-.301.023-.09.042-.182.059-.275.041-.22.069-.446.069-.679H0c0 .233.028.458.068.679zM0 23h36v2H0zm0-4v2h36v-2H18zm18-4h18v2H18zm0-4h18v2H18zM0 9c0-.233.03-.457.068-.679C.028 8.542 0 8.767 0 9zm.555-2l-.003.005L.555 7zM.128 8.044c.025-.102.06-.199.092-.297-.034.098-.066.196-.092.297zM18 9h18c0-.233-.028-.459-.069-.68-.017-.092-.035-.184-.059-.274-.027-.103-.059-.203-.094-.302-.089-.258-.197-.507-.332-.74.001-.001 0-.003-.001-.004H18v2z" fill="#EEE"></path>
+    <path d="M18 5H4C1.791 5 0 6.791 0 9v10h18V5z" fill="#3C3B6E"></path>
+    <path d="m2.001 7.726.618.449-.236.725L3 8.452l.618.448-.236-.725L4 7.726h-.764L3 7l-.235.726zm2 2 .618.449-.236.725.617-.448.618.448-.236-.725L6 9.726h-.764L5 9l-.235.726zm4 0 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L9 9l-.235.726zm4 0 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L13 9l-.235.726zm-8 4 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L5 13l-.235.726zm4 0 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L9 13l-.235.726zm4 0 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L13 13l-.235.726zm-6-6 .618.449-.236.725L7 8.452l.618.448-.236-.725L8 7.726h-.764L7 7l-.235.726zm4 0 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L11 7l-.235.726zm4 0 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L15 7l-.235.726zm-12 4 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L3 11l-.235.726zM6.383 12.9 7 12.452l.618.448-.236-.725.618-.449h-.764L7 11l-.235.726h-.764l.618.449zm3.618-1.174.618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L11 11l-.235.726zm4 0 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L15 11l-.235.726zm-12 4 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L3 15l-.235.726zM6.383 16.9 7 16.452l.618.448-.236-.725.618-.449h-.764L7 15l-.235.726h-.764l.618.449zm3.618-1.174.618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L11 15l-.235.726zm4 0 .618.449-.236.725.617-.448.618.448-.236-.725.618-.449h-.764L15 15l-.235.726z" fill="#FFF"></path>
   </svg>
 `;
+
+const MANGADEX_STATUS_ICON_MARKUP: Record<MangaDexStatusIconKey, string> = {
+  "slight-smile": `
+    <svg viewBox="0 0 36 36" aria-hidden="true">
+      <circle cx="18" cy="18" r="18" fill="#FFCC4D"></circle>
+      <path d="M10.515 23.621C10.56 23.8 11.683 28 18 28c6.318 0 7.44-4.2 7.485-4.379.055-.217-.043-.442-.237-.554-.195-.111-.439-.078-.6.077C24.629 23.163 22.694 25 18 25s-6.63-1.837-6.648-1.855C11.256 23.05 11.128 23 11 23c-.084 0-.169.021-.246.064-.196.112-.294.339-.239.557z" fill="#664500"></path>
+      <ellipse cx="12" cy="13.5" rx="2.5" ry="3.5" fill="#664500"></ellipse>
+      <ellipse cx="24" cy="13.5" rx="2.5" ry="3.5" fill="#664500"></ellipse>
+    </svg>
+  `,
+  "melting-face": `
+    <svg viewBox="0 0 36 36" aria-hidden="true">
+      <path d="M35.07 32.558a1.92 1.92 0 0 0 .836-2.241c-.259-.81-1.07-1.317-1.921-1.317H32a1 1 0 0 1 0-2h1.5a1.5 1.5 0 1 0-.04-3c-.8.021-1.46-.623-1.46-1.423v-.003c0-.293.06-.578.176-.847a15.294 15.294 0 0 0 1.294-7.191C32.978 6.66 26.411.269 18.524.009 9.724-.281 2.5 6.766 2.5 15.5c0 2.371.548 4.609 1.5 6.619v1.88c0 1.086-.865 2.021-1.951 2a2 2 0 0 0-2.034 2.167C.101 29.225 1.069 30 2.133 30h8.039A1.17 1.17 0 0 1 11 32l-3.03.757a1.281 1.281 0 0 0 0 2.485c1.932.483 3.914.737 5.905.756l2.712.026c1.406.014 2.803-.31 4.029-1a8.289 8.289 0 0 1 5.642-.913c3.028.588 6.167.034 8.812-1.553z" fill="#FFCC4D"></path>
+      <path d="M18.736 24.003c-.754 0-1.504-.078-2.244-.234-2.693-.571-5.003-2.115-6.338-4.236a1 1 0 0 1 1.692-1.066c1.033 1.642 2.925 2.892 5.06 3.345 1.767.375 4.507.393 7.536-1.642a1 1 0 0 1 1.116 1.66c-2.129 1.43-4.489 2.173-6.822 2.173z" fill="#65471B"></path>
+      <ellipse cx="14" cy="12" rx="2" ry="3" fill="#65471B"></ellipse>
+      <ellipse cx="23" cy="14" rx="2" ry="3" fill="#65471B"></ellipse>
+    </svg>
+  `,
+  "clown-face": `
+    <svg viewBox="0 0 36 36" aria-hidden="true">
+      <circle cx="29" cy="3" r="2" fill="#4289C1"></circle>
+      <circle cx="33" cy="8" r="3" fill="#4289C1"></circle>
+      <circle cx="33" cy="4" r="3" fill="#4289C1"></circle>
+      <circle cx="7" cy="3" r="2" fill="#4289C1"></circle>
+      <circle cx="3" cy="8" r="3" fill="#4289C1"></circle>
+      <circle cx="3" cy="4" r="3" fill="#4289C1"></circle>
+      <path d="M36 18c0 9.941-8.059 18-18 18S0 27.941 0 18 8.059 0 18 0s18 8.059 18 18" fill="#FEE7B8"></path>
+      <circle cx="30.5" cy="4.5" r="2.5" fill="#4289C1"></circle>
+      <circle cx="32" cy="7" r="2" fill="#4289C1"></circle>
+      <circle cx="5.5" cy="4.5" r="2.5" fill="#4289C1"></circle>
+      <circle cx="4" cy="7" r="2" fill="#4289C1"></circle>
+      <circle cx="6.93" cy="21" r="4" fill="#FF7892"></circle>
+      <circle cx="28.93" cy="21" r="4" fill="#FF7892"></circle>
+      <path d="M27.335 23.629c-.178-.161-.444-.171-.635-.029-.039.029-3.922 2.9-8.7 2.9-4.766 0-8.662-2.871-8.7-2.9-.191-.142-.457-.13-.635.029-.177.16-.217.424-.094.628C8.7 24.472 11.788 31 18 31s9.301-6.528 9.429-6.743c.123-.205.084-.468-.094-.628z" fill="#DA2F47"></path>
+      <ellipse cx="11.5" cy="11.5" rx="2.5" ry="3.5" fill="#664500"></ellipse>
+      <ellipse cx="25.5" cy="11.5" rx="2.5" ry="3.5" fill="#664500"></ellipse>
+      <circle cx="18.5" cy="19.5" r="3.5" fill="#BB1A34"></circle>
+    </svg>
+  `,
+  pensive: `
+    <svg viewBox="0 0 36 36" aria-hidden="true">
+      <path d="M36 18c0 9.941-8.059 18-18 18-9.94 0-18-8.059-18-18C0 8.06 8.06 0 18 0c9.941 0 18 8.06 18 18" fill="#FFCC4D"></path>
+      <path d="M17.312 17.612c-.176-.143-.427-.147-.61-.014-.012.009-1.26.902-3.702.902-2.441 0-3.69-.893-3.7-.9-.183-.137-.435-.133-.611.009-.178.142-.238.386-.146.594.06.135 1.5 3.297 4.457 3.297 2.958 0 4.397-3.162 4.457-3.297.092-.207.032-.449-.145-.591zm10 0c-.176-.143-.426-.148-.61-.014-.012.009-1.261.902-3.702.902-2.44 0-3.69-.893-3.7-.9-.183-.137-.434-.133-.611.009-.178.142-.238.386-.146.594.06.135 1.5 3.297 4.457 3.297 2.958 0 4.397-3.162 4.457-3.297.092-.207.032-.449-.145-.591zM22 28h-8c-.552 0-1-.447-1-1s.448-1 1-1h8c.553 0 1 .447 1 1s-.447 1-1 1zM6 14c-.552 0-1-.448-1-1 0-.551.445-.998.996-1 .156-.002 3.569-.086 6.205-3.6.331-.44.957-.532 1.4-.2.442.331.531.958.2 1.4C10.538 13.95 6.184 14 6 14zm24 0c-.184 0-4.537-.05-7.8-4.4-.332-.442-.242-1.069.2-1.4.441-.333 1.067-.242 1.399.2 2.641 3.521 6.061 3.599 6.206 3.6.55.006.994.456.991 1.005-.002.551-.446.995-.996.995z" fill="#664500"></path>
+    </svg>
+  `,
+};
 
 const INCORRECT_ICON = `
   <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -297,6 +365,7 @@ const INCORRECT_ICON = `
 let currentSourceUrl = "";
 let currentTabId: number | null = null;
 let currentCache: CachedLookup | null = null;
+let currentCachedResultFlags: Partial<Record<ProviderKey, boolean>> = {};
 let pendingConfirmation: PendingConfirmation | null = null;
 let currentSettings: ExtensionSettings = DEFAULT_SETTINGS;
 let retryCountdowns: Partial<Record<ProviderKey, number>> = {};
@@ -306,6 +375,11 @@ let currentViewState: PopupViewState = "loading";
 let currentErrorMessage = "Search failed.";
 let currentProviderPage: ProviderPageContext | null = null;
 let currentInactiveTitleMarkup = '<span class="brand-white">Manga</span> <span class="brand-red">Baka</span>';
+let currentCacheSeriesStats: CacheSeriesStats = { seriesCount: 0, totalBytes: 0 };
+let currentCacheSeriesStatFormat: "count" | "size" = "count";
+let currentMangaDexPurgeStats: MangaDexPurgeStats = { purgedCount: 0, totalCount: 0 };
+let currentMangaDexPurgeStatFormat: "percent" | "fraction" = "percent";
+let currentVersionInfoMode: "version" | "releaseDate" = "version";
 const RETRY_COOLDOWN_SECONDS = 2;
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -317,9 +391,9 @@ async function initializePopup(): Promise<void> {
   setStatus("Checking the current tab...", "idle");
   currentInactiveTitleMarkup = await getAlternatingInactiveTitleMarkup();
   currentSettings = await loadSettings();
-  getInfoVersionNode().textContent = EXTENSION_VERSION_NAME;
   wireOptionsControls();
   renderOptionsPanel();
+  await refreshInfoPanelStats();
 
   const activeTab = await getActiveTab();
   currentTabId = typeof activeTab?.id === "number" ? activeTab.id : null;
@@ -329,6 +403,7 @@ async function initializePopup(): Promise<void> {
   const providerPageContext = await getProviderPageContext(currentSourceUrl);
   if (providerPageContext) {
     currentCache = null;
+    currentCachedResultFlags = {};
     currentProviderPage = providerPageContext;
     renderProviderPageState(providerPageContext);
     return;
@@ -337,6 +412,7 @@ async function initializePopup(): Promise<void> {
   currentProviderPage = null;
   if (!isMangabakaSeriesUrl(currentSourceUrl)) {
     currentCache = null;
+    currentCachedResultFlags = {};
     await renderUnsupportedState();
     return;
   }
@@ -344,6 +420,7 @@ async function initializePopup(): Promise<void> {
   const seriesId = getSeriesIdFromUrl(currentSourceUrl);
   if (!seriesId) {
     currentCache = null;
+    currentCachedResultFlags = {};
     await renderUnsupportedState();
     return;
   }
@@ -354,6 +431,7 @@ async function initializePopup(): Promise<void> {
   const cachedLookup = await loadCache(seriesId);
   if (cachedLookup) {
     currentCache = cachedLookup;
+    currentCachedResultFlags = buildCachedResultFlags(cachedLookup.results, true);
     renderLookup(cachedLookup, true);
     return;
   }
@@ -454,6 +532,30 @@ function wireOptionsControls(): void {
   getInfoTabButton().onclick = () => {
     void updateOptionsPanelTab("info");
   };
+  getInfoVersionNode().onclick = () => {
+    currentVersionInfoMode = currentVersionInfoMode === "version" ? "releaseDate" : "version";
+    renderInfoPanel();
+  };
+  getInfoCachedSeriesStatButton().onclick = () => {
+    currentCacheSeriesStatFormat = currentCacheSeriesStatFormat === "count" ? "size" : "count";
+    renderInfoPanel();
+  };
+  getInfoMangaDexPurgeStatButton().onclick = () => {
+    currentMangaDexPurgeStatFormat = currentMangaDexPurgeStatFormat === "percent" ? "fraction" : "percent";
+    renderInfoPanel();
+  };
+  getInfoResetExtensionButton().onclick = () => {
+    requestMultiClickConfirmation(
+      getInfoResetExtensionButton(),
+      [
+        "Reset Extension requires 2 more clicks. This will clear all extension settings, cache, and history.",
+        "Reset Extension requires 1 more click. This cannot be undone.",
+      ],
+      handleExtensionReset,
+      "action-button--confirm",
+    );
+    scrollPopupToBottom();
+  };
 
   const wireProviderOption = (providerKey: ProviderKey, input: HTMLInputElement): void => {
     input.onchange = () => {
@@ -526,7 +628,7 @@ function renderOptionsPanel(): void {
   getProviderLinkTypeSelect().value = currentSettings.providerLinkType;
   getMangaBakaButtonTargetSelect().value = currentSettings.mangaBakaButtonTarget;
   getMangaBakaProfileNameInput().value = currentSettings.mangaBakaProfileName;
-  getInfoVersionNode().textContent = EXTENSION_VERSION_NAME;
+  renderInfoPanel();
   renderOptionsPanelTabs();
   renderMangaBakaNavigationControls();
 }
@@ -614,6 +716,243 @@ function renderOptionsPanelTabs(): void {
   getInfoTabButton().setAttribute("aria-selected", activeTab === "info" ? "true" : "false");
   getInfoTabButton().tabIndex = activeTab === "info" ? 0 : -1;
   getInfoTabPanel().hidden = activeTab !== "info";
+}
+
+function renderInfoPanel(): void {
+  getInfoVersionLabelNode().textContent = currentVersionInfoMode === "version" ? "Version Name" : "Build Date";
+  getInfoVersionNode().textContent = currentVersionInfoMode === "version" ? EXTENSION_VERSION_NAME : EXTENSION_BUILD_DATE;
+  getInfoVersionNode().title = currentVersionInfoMode === "version"
+    ? "Click to show the build date"
+    : "Click to show the version name";
+  getInfoVersionNode().setAttribute("aria-label", getInfoVersionNode().title);
+  renderInstallSourceInfo();
+  renderCachedSeriesStat();
+  getInfoMangaDexPurgeRow().hidden = !currentSettings.enabledProviders.mangadex;
+  renderMangaDexPurgeStat();
+}
+
+function renderInstallSourceInfo(): void {
+  const installSource = getInstallSourceInfo();
+  const installSourceNode = getInfoInstallSourceNode();
+
+  installSourceNode.textContent = installSource.url ? `${installSource.label} ↗` : `${installSource.label} (TBD)`;
+  if (installSource.url) {
+    installSourceNode.textContent = `${installSource.label} \u2197`;
+    installSourceNode.href = installSource.url;
+    installSourceNode.setAttribute("aria-disabled", "false");
+    installSourceNode.tabIndex = 0;
+    return;
+  }
+
+  installSourceNode.textContent = `${installSource.label} (TBD)`;
+  installSourceNode.removeAttribute("href");
+  installSourceNode.setAttribute("aria-disabled", "true");
+  installSourceNode.tabIndex = -1;
+}
+
+function renderMangaDexPurgeStat(): void {
+  const purgeStatButton = getInfoMangaDexPurgeStatButton();
+  const { purgedCount, totalCount } = currentMangaDexPurgeStats;
+  const hasStats = totalCount > 0;
+  const percentage = hasStats ? (purgedCount / totalCount) * 100 : null;
+  const iconKey = getMangaDexPurgeIconKey(percentage ?? -1);
+
+  const label = hasStats
+    ? currentMangaDexPurgeStatFormat === "fraction"
+      ? `${purgedCount}/${totalCount}`
+      : `${formatPercentage(purgedCount, totalCount)}`
+    : "N/A";
+  setInfoPanelToggleContent(purgeStatButton, label, hasStats ? iconKey : null);
+  purgeStatButton.disabled = !hasStats;
+  purgeStatButton.title = hasStats
+    ? currentMangaDexPurgeStatFormat === "fraction"
+      ? "Click to show as a percentage"
+      : "Click to show as a fraction"
+    : "No cached MangaDex entries";
+  purgeStatButton.setAttribute("aria-label", purgeStatButton.title);
+}
+
+function renderCachedSeriesStat(): void {
+  const cacheSeriesStatButton = getInfoCachedSeriesStatButton();
+  const { seriesCount, totalBytes } = currentCacheSeriesStats;
+  const isShowingSize = currentCacheSeriesStatFormat === "size";
+
+  cacheSeriesStatButton.textContent = isShowingSize ? formatByteSize(totalBytes) : `${seriesCount} Series`;
+  cacheSeriesStatButton.disabled = false;
+  cacheSeriesStatButton.title = isShowingSize ? "Click to show the cached series count" : "Click to show the cache size";
+  cacheSeriesStatButton.setAttribute("aria-label", cacheSeriesStatButton.title);
+}
+
+function buildCachedResultFlags(
+  results: LookupResults,
+  fromCache: boolean,
+): Partial<Record<ProviderKey, boolean>> {
+  return PROVIDER_KEYS.reduce(
+    (flags, providerKey) => {
+      if (fromCache && results[providerKey]) {
+        flags[providerKey] = true;
+      }
+      return flags;
+    },
+    {} as Partial<Record<ProviderKey, boolean>>,
+  );
+}
+
+function getInstallSourceInfo(): InstallSourceInfo {
+  if (/\(Google\)$/i.test(EXTENSION_VERSION_NAME)) {
+    return { label: "Google", url: null };
+  }
+
+  if (/\(Firefox\)$/i.test(EXTENSION_VERSION_NAME)) {
+    return { label: "Firefox", url: null };
+  }
+
+  return { label: "Local", url: LOCAL_INSTALL_SOURCE_URL };
+}
+
+function formatPercentage(numerator: number, denominator: number): string {
+  if (denominator <= 0) {
+    return "N/A";
+  }
+
+  const percentage = (numerator / denominator) * 100;
+  return `${percentage % 1 === 0 ? percentage.toFixed(0) : percentage.toFixed(1)}%`;
+}
+
+function getMangaDexPurgeIconKey(percentage: number): MangaDexStatusIconKey | null {
+  if (percentage < 0) {
+    return null;
+  }
+
+  if (percentage === 0) {
+    return "slight-smile";
+  }
+
+  if (percentage < 50) {
+    return "melting-face";
+  }
+
+  return "clown-face";
+}
+
+function createStatusIconSvg(className: string, iconKey: MangaDexStatusIconKey): SVGSVGElement {
+  const template = document.createElement("template");
+  template.innerHTML = MANGADEX_STATUS_ICON_MARKUP[iconKey].trim();
+  const icon = template.content.firstElementChild;
+  if (!(icon instanceof SVGSVGElement)) {
+    throw new Error(`Missing SVG markup for status icon: ${iconKey}`);
+  }
+  icon.classList.add(className);
+  return icon;
+}
+
+function setInfoPanelToggleContent(button: HTMLButtonElement, text: string, iconKey: MangaDexStatusIconKey | null): void {
+  const children: Node[] = [document.createTextNode(text)];
+  if (iconKey) {
+    children.push(createStatusIconSvg("info-panel-toggle-icon", iconKey));
+  }
+  button.replaceChildren(...children);
+}
+
+function formatByteSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) {
+    const megabytes = bytes / (1024 * 1024);
+    return `${megabytes % 1 === 0 ? megabytes.toFixed(0) : megabytes.toFixed(1)} MBytes`;
+  }
+
+  if (bytes >= 1024) {
+    const kilobytes = bytes / 1024;
+    return `${kilobytes % 1 === 0 ? kilobytes.toFixed(0) : kilobytes.toFixed(1)} KBytes`;
+  }
+
+  return `${bytes} Bytes`;
+}
+
+function estimateStorageEntryBytes(key: string, value: unknown): number {
+  const encoder = new TextEncoder();
+  const serializedValue = JSON.stringify(value);
+  return encoder.encode(key).length + encoder.encode(serializedValue).length;
+}
+
+function isCachedLookup(value: unknown): value is CachedLookup {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const cache = value as Partial<CachedLookup>;
+  return cache.version === CACHE_VERSION && typeof cache.seriesId === "string" && typeof cache.results === "object";
+}
+
+function isMangadexPurgedResult(result: ProviderMatch | null): boolean {
+  return result?.provider === "MangaDex" && result.latestChapterNumber == null;
+}
+
+function isManuallyPurgedMangaDexResult(result: ProviderMatch | null): boolean {
+  return result?.provider === "MangaDex" && typeof result.manualPurgedChapterNumber === "string" && result.manualPurgedChapterNumber.length > 0;
+}
+
+function canToggleMangaDexPurgedResult(result: ProviderMatch | null): boolean {
+  return result?.provider === "MangaDex"
+    && (
+      (typeof result.latestChapterNumber === "string" && result.latestChapterNumber.length > 0)
+      || isManuallyPurgedMangaDexResult(result)
+    );
+}
+
+async function refreshInfoPanelStats(): Promise<void> {
+  const storedEntries = await chrome.storage.local.get(null);
+  let purgedCount = 0;
+  let totalCount = 0;
+  let seriesCount = 0;
+  let totalBytes = 0;
+
+  for (const [key, value] of Object.entries(storedEntries)) {
+    if (!key.startsWith("lookup:") || !isCachedLookup(value)) {
+      continue;
+    }
+
+    seriesCount += 1;
+    totalBytes += estimateStorageEntryBytes(key, value);
+
+    const mangaDexResult = value.results.mangadex;
+    if (!mangaDexResult) {
+      continue;
+    }
+
+    totalCount += 1;
+    if (isMangadexPurgedResult(mangaDexResult)) {
+      purgedCount += 1;
+    }
+  }
+
+  currentCacheSeriesStats = { seriesCount, totalBytes };
+  currentMangaDexPurgeStats = { purgedCount, totalCount };
+  renderInfoPanel();
+}
+
+async function handleExtensionReset(): Promise<void> {
+  setStatus("Resetting extension...", "loading");
+  await chrome.storage.local.clear();
+  currentCache = null;
+  currentCachedResultFlags = {};
+  currentSettings = {
+    ...DEFAULT_SETTINGS,
+    enabledProviders: { ...DEFAULT_ENABLED_PROVIDERS },
+  };
+  retryCountdowns = {};
+  retryInProgress = {};
+  armedReadLinkSaves = {};
+  currentCacheSeriesStats = { seriesCount: 0, totalBytes: 0 };
+  currentMangaDexPurgeStats = { purgedCount: 0, totalCount: 0 };
+  currentCacheSeriesStatFormat = "count";
+  currentMangaDexPurgeStatFormat = "percent";
+  currentVersionInfoMode = "version";
+  setStatus("Extension reset complete", "success");
+  window.location.reload();
+}
+
+function scrollPopupToBottom(): void {
+  window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "auto" });
 }
 
 function isOptionsPanelOpen(): boolean {
@@ -855,21 +1194,31 @@ async function fetchProviderPageMetadata(
   }
 }
 
-async function fetchProviderDocument(sourceUrl: string): Promise<Document | null> {
+async function fetchProviderDocumentWithStatus(
+  sourceUrl: string,
+): Promise<{ status: number | null; document: Document | null }> {
   try {
     const response = await fetch(sourceUrl, { credentials: "include" });
     if (!response.ok) {
-      return null;
+      return { status: response.status, document: null };
     }
 
-    return new DOMParser().parseFromString(await response.text(), "text/html");
+    return {
+      status: response.status,
+      document: new DOMParser().parseFromString(await response.text(), "text/html"),
+    };
   } catch {
-    return null;
+    return { status: null, document: null };
   }
 }
 
+async function fetchProviderDocument(sourceUrl: string): Promise<Document | null> {
+  const result = await fetchProviderDocumentWithStatus(sourceUrl);
+  return result.document;
+}
+
 function parseAtsumaruEmbeddedTitles(scriptText: string): string[] {
-  const match = scriptText.match(/window\.mangaPage\s*=\s*(\{[\s\S]*?\});/);
+  const match = scriptText.match(/window\.mangaPage\s*=\s*(\{[\s\S]*?});/);
   if (!match) {
     return [];
   }
@@ -926,7 +1275,6 @@ function getSeriesTitlesFromAnchors(documentNode: Document, pathPattern: RegExp)
         titles.push(hyphenatedTitleToText(slug));
       }
     } catch {
-      continue;
     }
   }
 
@@ -1084,15 +1432,7 @@ function getAtsumaruMetadataUrl(sourceUrl: string, pageType: "series" | "chapter
   return sourceUrl;
 }
 
-async function fetchAtsumaruProviderPageMetadata(
-  sourceUrl: string,
-  pageType: "series" | "chapter",
-): Promise<ExtractedMetadataPayload | null> {
-  const documentNode = await fetchProviderDocument(getAtsumaruMetadataUrl(sourceUrl, pageType));
-  if (!documentNode) {
-    return null;
-  }
-
+function extractAtsumaruProviderPageMetadataFromDocument(documentNode: Document): ExtractedMetadataPayload | null {
   const embeddedTitles = Array.from(documentNode.querySelectorAll("script"))
     .flatMap((script) => parseAtsumaruEmbeddedTitles(script.textContent ?? ""));
 
@@ -1104,6 +1444,18 @@ async function fetchAtsumaruProviderPageMetadata(
   ]);
 
   return titles.length > 0 ? { titles, authors: [] } : null;
+}
+
+async function fetchAtsumaruProviderPageMetadata(
+  sourceUrl: string,
+  pageType: "series" | "chapter",
+): Promise<ExtractedMetadataPayload | null> {
+  const documentNode = await fetchProviderDocument(getAtsumaruMetadataUrl(sourceUrl, pageType));
+  if (!documentNode) {
+    return null;
+  }
+
+  return extractAtsumaruProviderPageMetadataFromDocument(documentNode);
 }
 
 async function fetchMangaDexProviderPageMetadata(
@@ -1165,12 +1517,10 @@ async function fetchMangaDexProviderPageMetadata(
   return null;
 }
 
-async function fetchMangaFireProviderPageMetadata(sourceUrl: string): Promise<ExtractedMetadataPayload | null> {
-  const documentNode = await fetchProviderDocument(sourceUrl);
-  if (!documentNode) {
-    return null;
-  }
-
+function extractMangaFireProviderPageMetadataFromDocument(
+  sourceUrl: string,
+  documentNode: Document,
+): ExtractedMetadataPayload | null {
   const syncDataText = documentNode.getElementById("syncData")?.textContent?.trim() ?? "";
   let syncDataName = "";
   if (syncDataText) {
@@ -1200,17 +1550,26 @@ async function fetchMangaFireProviderPageMetadata(sourceUrl: string): Promise<Ex
   return titles.length > 0 ? { titles, authors: [] } : null;
 }
 
-async function fetchWeebCentralProviderPageMetadata(
+async function fetchMangaFireProviderPageMetadata(sourceUrl: string): Promise<ExtractedMetadataPayload | null> {
+  const documentNode = await fetchProviderDocument(sourceUrl);
+  if (!documentNode) {
+    return null;
+  }
+
+  return extractMangaFireProviderPageMetadataFromDocument(sourceUrl, documentNode);
+}
+
+function extractWeebCentralProviderPageMetadataFromDocument(
   sourceUrl: string,
   pageType: "series" | "chapter",
-): Promise<ExtractedMetadataPayload | null> {
+  documentNode: Document | null,
+): ExtractedMetadataPayload | null {
   const parsedUrl = new URL(sourceUrl);
   const segments = parsedUrl.pathname.split("/").filter(Boolean);
   const slugTitle = pageType === "series" && segments[0] === "series" && segments[2]
     ? hyphenatedTitleToText(segments[2])
     : "";
 
-  const documentNode = await fetchProviderDocument(sourceUrl);
   const fetchedTitles = documentNode
     ? [
         getDocumentMetaContent(documentNode, "meta[property='og:title']"),
@@ -1224,6 +1583,14 @@ async function fetchWeebCentralProviderPageMetadata(
 
   const titles = cleanProviderPageTitles("weebcentral", [slugTitle, ...fetchedTitles]);
   return titles.length > 0 ? { titles, authors: [] } : null;
+}
+
+async function fetchWeebCentralProviderPageMetadata(
+  sourceUrl: string,
+  pageType: "series" | "chapter",
+): Promise<ExtractedMetadataPayload | null> {
+  const documentNode = await fetchProviderDocument(sourceUrl);
+  return extractWeebCentralProviderPageMetadataFromDocument(sourceUrl, pageType, documentNode);
 }
 
 async function extractProviderPageMetadataFromActiveTab(
@@ -1438,7 +1805,6 @@ async function extractProviderPageMetadataFromActiveTab(
                 candidates.push(text);
               }
             } catch {
-              continue;
             }
           }
         };
@@ -1456,7 +1822,7 @@ async function extractProviderPageMetadataFromActiveTab(
             .filter(Boolean);
 
           for (const scriptText of scriptTexts) {
-            const match = scriptText.match(/window\.mangaPage\s*=\s*(\{[\s\S]*?\});/);
+            const match = scriptText.match(/window\.mangaPage\s*=\s*(\{[\s\S]*?});/);
             if (!match) {
               continue;
             }
@@ -1480,7 +1846,6 @@ async function extractProviderPageMetadataFromActiveTab(
                 return titles;
               }
             } catch {
-              continue;
             }
           }
 
@@ -1530,7 +1895,6 @@ async function extractProviderPageMetadataFromActiveTab(
                 }
               }
             } catch {
-              continue;
             }
           }
 
@@ -1612,6 +1976,39 @@ function buildMangaBakaSearchUrl(title: string): string {
   return `https://mangabaka.org/search?q=${encodeURIComponent(title)}`;
 }
 
+function getUrlPathSegments(sourceUrl: string): string[] {
+  try {
+    return new URL(sourceUrl).pathname.split("/").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function getAtsumaruMangaIdFromUrl(sourceUrl: string): string | null {
+  const segments = getUrlPathSegments(sourceUrl);
+  return segments[0] === "manga" && segments[1] ? segments[1] : null;
+}
+
+function getMangaDexMangaIdFromUrl(sourceUrl: string): string | null {
+  const segments = getUrlPathSegments(sourceUrl);
+  return segments[0] === "title" && segments[1] ? segments[1] : null;
+}
+
+function extractGenericProviderPageMetadataFromDocument(
+  providerKey: ProviderKey,
+  documentNode: Document,
+): ExtractedMetadataPayload | null {
+  const titles = cleanProviderPageTitles(providerKey, [
+    getDocumentMetaContent(documentNode, "meta[property='og:title']"),
+    getDocumentMetaContent(documentNode, "meta[name='twitter:title']"),
+    documentNode.title,
+    getTextContent(documentNode, "h1"),
+    ...extractTitleCandidatesFromDocument(documentNode),
+  ]);
+
+  return titles.length > 0 ? { titles, authors: [] } : null;
+}
+
 function createEmptyRejectedProviderUrls(): RejectedProviderUrls {
   return cloneRejectedProviderUrls(EMPTY_REJECTED_PROVIDER_URLS);
 }
@@ -1670,10 +2067,12 @@ async function saveCache(cache: CachedLookup): Promise<void> {
   await chrome.storage.local.set({
     [getCacheKey(cache.seriesId)]: cache,
   });
+  await refreshInfoPanelStats();
 }
 
 async function clearCache(seriesId: string): Promise<void> {
   await chrome.storage.local.remove(getCacheKey(seriesId));
+  await refreshInfoPanelStats();
 }
 
 async function runLookup(
@@ -1708,6 +2107,7 @@ async function runLookup(
 
     await saveCache(cache);
     currentCache = cache;
+    currentCachedResultFlags = buildCachedResultFlags(results, false);
     renderLookup(cache, false);
   } catch (error) {
     currentCache = null;
@@ -1870,7 +2270,6 @@ async function extractMetadataFromActiveTab(): Promise<ExtractedMetadataPayload 
               return { titles, authors: asAuthorNames(data.author) };
             }
           } catch {
-            continue;
           }
         }
 
@@ -1913,7 +2312,6 @@ function extractMetadataFromHtml(html: string): ExtractedMetadataPayload | null 
         return { titles, authors: asAuthorNames(data.author) };
       }
     } catch {
-      continue;
     }
   }
 
@@ -2178,7 +2576,6 @@ async function searchEHentai(
 
       html = await response.text();
     } catch {
-      continue;
     }
 
     const searchResults = extractEHentaiSearchResults(html, domain);
@@ -2249,7 +2646,7 @@ async function searchMangaFire(metadata: MangaBakaMetadata, rejectedUrls: string
         return getMangaFireTitleFromUrl(url) || cleanMangaFireResultTitle(result.title) || "MangaFire";
       },
     })) ??
-    searchViaBrave(metadata, rejectedUrls, titleIndex, {
+    (await searchViaBrave(metadata, rejectedUrls, titleIndex, {
       provider: "MangaFire",
       siteQuery: "site:mangafire.to/manga",
       matchUrl(url) {
@@ -2272,7 +2669,7 @@ async function searchMangaFire(metadata: MangaBakaMetadata, rejectedUrls: string
       getDisplayTitle(result, url) {
         return getMangaFireTitleFromUrl(url) || cleanMangaFireResultTitle(result.title) || "MangaFire";
       },
-    })
+    }))
   );
 }
 
@@ -2302,7 +2699,7 @@ async function searchWeebCentral(metadata: MangaBakaMetadata, rejectedUrls: stri
         return getWeebCentralTitleFromUrl(url) || cleanWeebCentralResultTitle(result.title) || "WeebCentral";
       },
     })) ??
-    searchViaBrave(metadata, rejectedUrls, titleIndex, {
+    (await searchViaBrave(metadata, rejectedUrls, titleIndex, {
       provider: "WeebCentral",
       siteQuery: "site:weebcentral.com/series",
       matchUrl(url) {
@@ -2325,7 +2722,7 @@ async function searchWeebCentral(metadata: MangaBakaMetadata, rejectedUrls: stri
       getDisplayTitle(result, url) {
         return getWeebCentralTitleFromUrl(url) || cleanWeebCentralResultTitle(result.title) || "WeebCentral";
       },
-    })
+    }))
   );
 }
 
@@ -2588,8 +2985,8 @@ function canonicalizeEHentaiGalleryUrl(url: URL, domain: "e-hentai" | "exhentai"
 
 function cleanEHentaiGalleryTitle(title: string): string {
   return title
-    .replace(/^\s*(\[[^\]]+\]\s*)+/, "")
-    .replace(/\s*(\[[^\]]+\]\s*)+$/, "")
+    .replace(/^\s*(\[[^]]+]\s*)+/, "")
+    .replace(/\s*(\[[^]]+]\s*)+$/, "")
     .replace(/\s+\|\s+.+$/, "")
     .trim();
 }
@@ -2882,6 +3279,7 @@ async function getAlternatingInactiveTitleMarkup(): Promise<string> {
 async function renderUnsupportedState(): Promise<void> {
   currentViewState = "unsupported";
   currentProviderPage = null;
+  currentCachedResultFlags = {};
   getTitleNode().classList.add("title--inactive");
   getTitleNode().innerHTML = currentInactiveTitleMarkup;
   getSubtitleNode().innerHTML = "Search on a MangaBaka series page<br>https://mangabaka.org/*ID*";
@@ -2893,6 +3291,7 @@ async function renderUnsupportedState(): Promise<void> {
 async function renderInvalidPageState(): Promise<void> {
   currentViewState = "invalid";
   currentProviderPage = null;
+  currentCachedResultFlags = {};
   getTitleNode().classList.add("title--inactive");
   getTitleNode().innerHTML = currentInactiveTitleMarkup;
   getSubtitleNode().textContent = "This URL does not correspond to a real MangaBaka series.";
@@ -2904,6 +3303,7 @@ async function renderInvalidPageState(): Promise<void> {
 function renderLoadingState(): void {
   currentViewState = "loading";
   currentProviderPage = null;
+  currentCachedResultFlags = {};
   clearPendingConfirmation();
   const resultsNode = getResultsNode();
   resultsNode.innerHTML = "";
@@ -2937,14 +3337,17 @@ function renderLookup(cache: CachedLookup, fromCache: boolean): void {
   getTitleNode().classList.remove("title--inactive");
   getTitleNode().textContent = cache.primaryTitle;
 
-  void fromCache;
   getSubtitleNode().textContent = cache.authors[0] ? `by ${cache.authors[0]}` : "";
   renderProviderRows(cache.results, {
     cache,
     emptyLabel: "No Match Found",
     enableProviderReset: true,
   });
-  setStatus(fromCache ? "Loaded cached result" : "Search complete", "success");
+  const hasEnabledProviders = getVisibleProviders().length > 0;
+  setStatus(
+    hasEnabledProviders ? (fromCache ? "Loaded cached result" : "Search complete") : "No providers enabled",
+    hasEnabledProviders ? "success" : "error",
+  );
   setResetEnabled(true);
 }
 
@@ -2971,6 +3374,7 @@ function renderProviderPageState(context: ProviderPageContext): void {
 
   currentViewState = "provider";
   currentProviderPage = context;
+  currentCachedResultFlags = {};
   getTitleNode().classList.remove("title--inactive");
   getTitleNode().textContent = context.isSearchable ? context.primaryTitle : context.providerLabel;
   getSubtitleNode().textContent = getProviderPageSubtitle(context.pageType);
@@ -3064,6 +3468,10 @@ function renderProviderRows(
     const providerLabel = getProviderDisplayLabel(provider.key);
     const providerEnabled = currentSettings.enabledProviders[provider.key];
     const providerSearched = options.cache?.searchedProviders?.[provider.key] ?? false;
+    const shouldShowRefreshButton =
+      Boolean(providerResult)
+      && currentViewState === "lookup"
+      && currentCachedResultFlags[provider.key] === true;
     const retryBusy = retryInProgress[provider.key] === true;
     const canSearchNow = Boolean(options.cache) && providerEnabled && !providerSearched && !providerResult;
     const attemptIndex = options.cache?.titleAttemptIndexes?.[provider.key] ?? 0;
@@ -3103,9 +3511,20 @@ function renderProviderRows(
     if (providerResult?.latestChapterNumber) {
       const latestLabel = `Ch. ${providerResult.latestChapterNumber.replace(/^page\.\s*/i, "")}`;
       meta.innerHTML = `${ENGLISH_FLAG_ICON}<span>${escapeHtml(latestLabel)}</span>`;
+      if (provider.key === "mangadex" && canToggleMangaDexPurgedResult(providerResult)) {
+        meta.onclick = () => {
+          void toggleMangaDexPurgedState();
+        };
+      }
     } else if (providerResult) {
       if (provider.key === "mangadex") {
-        meta.innerHTML = `${ENGLISH_FLAG_ICON}<span>Purged 😔</span>`;
+        meta.innerHTML = `${ENGLISH_FLAG_ICON}<span>Purged</span>`;
+        meta.append(createStatusIconSvg("provider-value-status-icon", "pensive"));
+        if (isManuallyPurgedMangaDexResult(providerResult)) {
+          meta.onclick = () => {
+            void toggleMangaDexPurgedState();
+          };
+        }
       } else if (provider.key === "mangafire" || provider.key === "weebcentral") {
         meta.textContent = "Cloudflare Error";
       } else {
@@ -3210,8 +3629,22 @@ function renderProviderRows(
       },
     );
 
+    const refreshButton = buildActionButton(
+      "icon-button",
+      RESET_ICON,
+      providerResult ? `Refresh the cached ${providerLabel} result` : `${providerLabel} unavailable`,
+      !providerResult || !shouldShowRefreshButton,
+      () => {
+        if (!providerResult || !shouldShowRefreshButton) {
+          return;
+        }
+
+        void handleProviderRefresh(provider.key);
+      },
+    );
+
     if (providerResult) {
-      actions.append(copyButton, openButton, incorrectButton);
+      actions.append(copyButton, openButton, shouldShowRefreshButton ? refreshButton : incorrectButton);
     } else if (canSearchNow) {
       actions.append(searchNowButton);
     } else if (providerEnabled && providerSearched) {
@@ -3309,6 +3742,7 @@ function renderErrorState(message: string): void {
   currentViewState = "error";
   currentErrorMessage = message;
   currentProviderPage = null;
+  currentCachedResultFlags = {};
   getTitleNode().classList.remove("title--inactive");
   getTitleNode().textContent = "Search failed";
   getSubtitleNode().textContent = message;
@@ -3362,11 +3796,168 @@ async function openMangaBakaSearch(title: string): Promise<void> {
   }
 }
 
+async function handleProviderRefresh(providerKey: ProviderKey): Promise<void> {
+  if (!currentCache || currentViewState !== "lookup" || currentCachedResultFlags[providerKey] !== true) {
+    return;
+  }
+
+  const currentResult = currentCache.results[providerKey];
+  if (!currentResult) {
+    return;
+  }
+
+  const providerLabel = getProviderDisplayLabel(providerKey);
+  setStatus(`Refreshing cached ${providerLabel} result...`, "loading");
+
+  const { status, document } = await fetchProviderDocumentWithStatus(currentResult.url);
+  if (!document) {
+    if (status === 404 || status === 410) {
+      const updatedCache: CachedLookup = {
+        ...currentCache,
+        rejectedUrls: {
+          ...currentCache.rejectedUrls,
+          [providerKey]: [],
+        },
+        titleAttemptIndexes: {
+          ...currentCache.titleAttemptIndexes,
+          [providerKey]: 0,
+        },
+        searchedProviders: {
+          ...currentCache.searchedProviders,
+          [providerKey]: false,
+        },
+        results: {
+          ...currentCache.results,
+          [providerKey]: null,
+        },
+        searchedAt: new Date().toISOString(),
+      };
+
+      delete armedReadLinkSaves[providerKey];
+      delete currentCachedResultFlags[providerKey];
+      await saveCache(updatedCache);
+      currentCache = updatedCache;
+      rerenderCurrentResultsOnly();
+      setStatus(`${providerLabel} URL no longer works. Search again to refresh it.`, "error");
+      return;
+    }
+
+    setStatus(
+      typeof status === "number" ? `Unable to refresh ${providerLabel} (${status})` : `Unable to refresh ${providerLabel}`,
+      "error",
+    );
+    return;
+  }
+
+  let refreshedMetadata: ExtractedMetadataPayload | null;
+  switch (providerKey) {
+    case "atsu":
+      refreshedMetadata = extractAtsumaruProviderPageMetadataFromDocument(document);
+      break;
+    case "mangadex":
+      refreshedMetadata = (await fetchMangaDexProviderPageMetadata(currentResult.url, "series"))
+        ?? extractGenericProviderPageMetadataFromDocument(providerKey, document);
+      break;
+    case "mangafire":
+      refreshedMetadata = extractMangaFireProviderPageMetadataFromDocument(currentResult.url, document);
+      break;
+    case "weebcentral":
+      refreshedMetadata = extractWeebCentralProviderPageMetadataFromDocument(currentResult.url, "series", document);
+      break;
+    default:
+      refreshedMetadata = extractGenericProviderPageMetadataFromDocument(providerKey, document);
+      break;
+  }
+
+  let latestChapterNumber = currentResult.latestChapterNumber;
+  let latestChapterLanguage = currentResult.latestChapterLanguage;
+  if (providerKey === "atsu") {
+    const mangaId = getAtsumaruMangaIdFromUrl(currentResult.url);
+    if (mangaId) {
+      latestChapterNumber = await fetchAtsumaruLatestChapterNumber(mangaId);
+      latestChapterLanguage = "en";
+    }
+  } else if (providerKey === "mangadex") {
+    const mangaId = getMangaDexMangaIdFromUrl(currentResult.url);
+    if (mangaId) {
+      latestChapterNumber = await fetchMangaDexLatestEnglishChapterNumber(mangaId);
+      latestChapterLanguage = "en";
+    }
+  }
+
+  const title = refreshedMetadata?.titles.length ? pickPreferredTitle(refreshedMetadata.titles) : currentResult.title;
+  const updatedResult: ProviderMatch = {
+    ...currentResult,
+    title,
+    latestChapterNumber,
+    latestChapterLanguage,
+    manualPurgedChapterNumber: null,
+  };
+  const changed =
+    updatedResult.title !== currentResult.title
+    || updatedResult.latestChapterNumber !== currentResult.latestChapterNumber
+    || updatedResult.latestChapterLanguage !== currentResult.latestChapterLanguage
+    || Boolean(currentResult.manualPurgedChapterNumber);
+
+  const updatedCache: CachedLookup = {
+    ...currentCache,
+    results: {
+      ...currentCache.results,
+      [providerKey]: updatedResult,
+    },
+    searchedAt: new Date().toISOString(),
+  };
+
+  currentCachedResultFlags[providerKey] = true;
+  await saveCache(updatedCache);
+  currentCache = updatedCache;
+  rerenderCurrentResultsOnly();
+  setStatus(changed ? `Updated cached ${providerLabel} result` : `No changes found for ${providerLabel}`, "success");
+}
+
 async function copyLink(providerKey: ProviderKey, url: string, providerLabel: string): Promise<void> {
   await navigator.clipboard.writeText(url);
   armedReadLinkSaves = { [providerKey]: url };
   rerenderCurrentResultsOnly();
   setStatus(`${providerLabel} link copied`, "success");
+}
+
+async function toggleMangaDexPurgedState(): Promise<void> {
+  if (!currentCache) {
+    return;
+  }
+
+  const currentResult = currentCache.results.mangadex;
+  if (!currentResult || currentResult.provider !== "MangaDex" || !canToggleMangaDexPurgedResult(currentResult)) {
+    return;
+  }
+
+  const mangaDexResult = currentResult;
+  const updatedResult: ProviderMatch = mangaDexResult.latestChapterNumber
+    ? {
+        ...mangaDexResult,
+        manualPurgedChapterNumber: mangaDexResult.latestChapterNumber,
+        latestChapterNumber: null,
+      }
+    : {
+        ...mangaDexResult,
+        latestChapterNumber: mangaDexResult.manualPurgedChapterNumber ?? null,
+        manualPurgedChapterNumber: null,
+      };
+
+  const updatedCache: CachedLookup = {
+    ...currentCache,
+    results: {
+      ...currentCache.results,
+      mangadex: updatedResult,
+    },
+    searchedAt: new Date().toISOString(),
+  };
+
+  await saveCache(updatedCache);
+  currentCache = updatedCache;
+  rerenderCurrentResultsOnly();
+  setStatus(updatedResult.latestChapterNumber ? "MangaDex purge cleared" : "MangaDex marked as purged", "success");
 }
 
 async function saveReadLink(providerKey: ProviderKey, url: string, providerLabel: string): Promise<void> {
@@ -3804,7 +4395,7 @@ async function saveReadLink(providerKey: ProviderKey, url: string, providerLabel
           return null;
         };
 
-        let input: HTMLInputElement | HTMLTextAreaElement | null = null;
+        let input: HTMLInputElement | HTMLTextAreaElement | null;
         let opener: HTMLElement | null = null;
         input = findReadLinkInput();
         if (!input) {
@@ -3863,7 +4454,8 @@ async function saveReadLink(providerKey: ProviderKey, url: string, providerLabel
 
     const result = results?.[0]?.result as { ok: boolean; error?: string } | undefined;
     if (!result?.ok) {
-      throw new Error(result?.error ?? "Unable to save MangaBaka Read Link.");
+      setStatus(result?.error ?? "Unable to save MangaBaka Read Link.", "error");
+      return;
     }
 
     delete armedReadLinkSaves[providerKey];
@@ -3887,6 +4479,7 @@ function wireTopResetButton(seriesId: string): void {
       "Press the top-right reset button again to clear the cache and all excluded results.",
       () => handleTopReset(seriesId),
     );
+    scrollPopupToBottom();
   };
 }
 
@@ -3894,6 +4487,7 @@ async function handleTopReset(seriesId: string): Promise<void> {
   setStatus("Clearing cached search...", "loading");
   await clearCache(seriesId);
   currentCache = null;
+  currentCachedResultFlags = {};
 
   if (!currentSourceUrl) {
     await renderUnsupportedState();
@@ -3942,6 +4536,7 @@ async function handleProviderReset(providerKey: ProviderKey): Promise<void> {
     };
 
     await saveCache(updatedCache);
+    currentCachedResultFlags[providerKey] = false;
     currentCache = updatedCache;
     renderLookup(updatedCache, false);
   } catch (error) {
@@ -3998,6 +4593,7 @@ async function handleProviderRetry(providerKey: ProviderKey): Promise<void> {
       };
 
       await saveCache(updatedCache);
+      currentCachedResultFlags[providerKey] = false;
       currentCache = updatedCache;
       rerenderCurrentResultsOnly();
 
@@ -4061,6 +4657,7 @@ async function handleProviderSearchNow(providerKey: ProviderKey): Promise<void> 
     };
 
     await saveCache(updatedCache);
+    currentCachedResultFlags[providerKey] = false;
     currentCache = updatedCache;
     renderLookup(updatedCache, false);
   } catch (error) {
@@ -4074,27 +4671,42 @@ function requestInlineConfirmation(
   message: string,
   action: () => Promise<void> | void,
 ): void {
+  requestMultiClickConfirmation(button, [message], action);
+}
+
+function requestMultiClickConfirmation(
+  button: HTMLButtonElement,
+  messages: string[],
+  action: () => Promise<void> | void,
+  activeClassName = "icon-button--confirm",
+): void {
   if (pendingConfirmation?.button === button && document.activeElement === button) {
-    const confirmedAction = pendingConfirmation.action;
-    clearPendingConfirmation();
-    void confirmedAction();
+    if (pendingConfirmation.messageIndex >= pendingConfirmation.messages.length - 1) {
+      const confirmedAction = pendingConfirmation.action;
+      clearPendingConfirmation();
+      void confirmedAction();
+      return;
+    }
+
+    pendingConfirmation.messageIndex += 1;
+    resetPendingConfirmationTimeout();
+    showConfirmPanel(pendingConfirmation.messages[pendingConfirmation.messageIndex]);
     return;
   }
 
   clearPendingConfirmation();
-  button.classList.add("icon-button--confirm");
+  button.classList.add(activeClassName);
   button.focus();
-
-  const timeoutId = window.setTimeout(() => {
-    clearPendingConfirmation();
-  }, 6000);
 
   pendingConfirmation = {
     button,
-    message,
+    messages,
+    messageIndex: 0,
     action,
-    timeoutId,
+    activeClassName,
+    timeoutId: 0,
   };
+  resetPendingConfirmationTimeout();
 
   button.addEventListener(
     "blur",
@@ -4108,7 +4720,18 @@ function requestInlineConfirmation(
     { once: true },
   );
 
-  showConfirmPanel(message);
+  showConfirmPanel(messages[0]);
+}
+
+function resetPendingConfirmationTimeout(): void {
+  if (!pendingConfirmation) {
+    return;
+  }
+
+  window.clearTimeout(pendingConfirmation.timeoutId);
+  pendingConfirmation.timeoutId = window.setTimeout(() => {
+    clearPendingConfirmation();
+  }, 6000);
 }
 
 function showConfirmPanel(message: string): void {
@@ -4124,7 +4747,7 @@ function clearPendingConfirmation(): void {
   }
 
   window.clearTimeout(pendingConfirmation.timeoutId);
-  pendingConfirmation.button.classList.remove("icon-button--confirm");
+  pendingConfirmation.button.classList.remove(pendingConfirmation.activeClassName);
   pendingConfirmation = null;
   getConfirmPanel().hidden = true;
 }
@@ -4192,8 +4815,32 @@ function getInfoTabPanel(): HTMLElement {
   return document.getElementById("options-panel-info") as HTMLElement;
 }
 
-function getInfoVersionNode(): HTMLElement {
-  return document.getElementById("info-version") as HTMLElement;
+function getInfoVersionLabelNode(): HTMLElement {
+  return document.getElementById("info-version-label") as HTMLElement;
+}
+
+function getInfoVersionNode(): HTMLButtonElement {
+  return document.getElementById("info-version") as HTMLButtonElement;
+}
+
+function getInfoInstallSourceNode(): HTMLAnchorElement {
+  return document.getElementById("info-install-source") as HTMLAnchorElement;
+}
+
+function getInfoMangaDexPurgeRow(): HTMLElement {
+  return document.getElementById("info-mangadex-purge-row") as HTMLElement;
+}
+
+function getInfoCachedSeriesStatButton(): HTMLButtonElement {
+  return document.getElementById("info-cached-series-stat") as HTMLButtonElement;
+}
+
+function getInfoMangaDexPurgeStatButton(): HTMLButtonElement {
+  return document.getElementById("info-mangadex-purge-stat") as HTMLButtonElement;
+}
+
+function getInfoResetExtensionButton(): HTMLButtonElement {
+  return document.getElementById("info-reset-extension-button") as HTMLButtonElement;
 }
 
 function getMangaBakaButton(): HTMLButtonElement {
@@ -4267,3 +4914,4 @@ function getConfirmMessageNode(): HTMLElement {
 function getResetButton(): HTMLButtonElement {
   return document.getElementById("reset-button") as HTMLButtonElement;
 }
+
