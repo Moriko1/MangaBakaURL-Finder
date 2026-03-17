@@ -193,6 +193,7 @@ const CACHE_VERSION = 10;
 const SETTINGS_KEY = "extension:settings";
 const POPUP_RELEASE_UPDATE_STORAGE_KEY = "extension:release-update";
 const LOCAL_INSTALL_SOURCE_URL = "https://github.com/Moriko1/MangaBakaURL-Finder/releases/latest";
+const GOOGLE_INSTALL_SOURCE_URL = "https://chromewebstore.google.com/detail/mangabaka-url-finder/akngneijkglanfogokinljffohnafhfb";
 const PROVIDER_KEYS: ProviderKey[] = ["atsu", "mangadex", "ehentai", "exhentai", "comixto", "mangafire", "weebcentral"];
 const PROVIDERS: Array<{ key: ProviderKey; label: ProviderMatch["provider"] }> = [
   { key: "atsu", label: "Atsumaru" },
@@ -1033,7 +1034,7 @@ function buildCachedResultFlags(
 
 function getInstallSourceInfo(): InstallSourceInfo {
   if (/\(Google\)$/i.test(EXTENSION_VERSION_NAME)) {
-    return { kind: "google", label: "Google", url: null };
+    return { kind: "google", label: "Chrome Web Store", url: GOOGLE_INSTALL_SOURCE_URL };
   }
 
   if (/\(Firefox\)$/i.test(EXTENSION_VERSION_NAME)) {

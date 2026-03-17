@@ -32,6 +32,7 @@ Stored data may include:
 - Excluded provider URLs.
 - Cached search timestamps.
 - The inactive title flip state.
+- Release-check status for non-store installs, such as the last check time, current version, latest release metadata, and last attempted check time.
 
 This data stays in the user's browser profile unless the user clears it or uses the extension's reset controls.
 
@@ -63,6 +64,12 @@ Depending on enabled providers and the active page, requests may be sent to:
 
 Google and Firefox packaged variants exclude `E-Hentai` and `ExHentai`.
 
+## Alarms Permission
+
+The extension uses the `alarms` permission only to schedule a once-daily background task that checks whether a newer project release is available on GitHub for non-store installs. This lets the extension refresh update availability without requiring the user to manually open the popup at the exact time of the check.
+
+The alarm does not read page content, monitor browsing activity, or collect personal information. It only triggers the extension's own background worker to perform the update check and store the resulting timestamp and release status locally in `chrome.storage.local`.
+
 ## Data Sharing
 
 The extension does not transmit browsing history, account data, or personal content to the developer.
@@ -81,3 +88,4 @@ Users can:
 ## Contact
 
 Project page: <https://github.com/Moriko1/MangaBakaURL-Finder>
+Chrome Web Store listing: <https://chromewebstore.google.com/detail/mangabaka-url-finder/akngneijkglanfogokinljffohnafhfb>
