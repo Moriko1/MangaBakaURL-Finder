@@ -1,6 +1,6 @@
 {
   "name": "mangabaka-url-finder",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "Find matching provider URLs for MangaBaka and search MangaBaka from supported provider pages.",
   "license": "SEE LICENSE IN LICENSE",
   "main": "dist/background.js",

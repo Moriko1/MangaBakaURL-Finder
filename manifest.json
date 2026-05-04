@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "MangaBaka URL Finder",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "Find matching Atsumaru and MangaDex (and more) URLs for MangaBaka.",
   "permissions": ["storage", "tabs", "scripting", "alarms"],
   "host_permissions": [

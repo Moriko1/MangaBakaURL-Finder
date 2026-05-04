@@ -39,7 +39,7 @@ interface RejectedProviderUrls {
 }
 
 interface CachedLookup {
-  version: 10;
+  version: 11;
   seriesId: string;
   sourceUrl: string;
   primaryTitle: string;
@@ -54,9 +54,12 @@ interface CachedLookup {
 
 interface AtsuSearchResponse {
   hits?: Array<{
-    id: string;
-    title: string;
-    type?: string;
+    document?: {
+      id?: string;
+      title?: string;
+      otherNames?: string[];
+      hidden?: boolean;
+    };
   }>;
 }
 
@@ -189,7 +192,7 @@ class InvalidMangaBakaPageError extends Error {
   }
 }
 
-const CACHE_VERSION = 10;
+const CACHE_VERSION = 11;
 const SETTINGS_KEY = "extension:settings";
 const POPUP_RELEASE_UPDATE_STORAGE_KEY = "extension:release-update";
 const LOCAL_INSTALL_SOURCE_URL = "https://github.com/Moriko1/MangaBakaURL-Finder/releases/latest";
@@ -2667,7 +2670,14 @@ async function searchAtsumaru(
   }
 
   try {
-    const response = await fetch(`https://atsu.moe/api/search/page?query=${encodeURIComponent(title)}`, {
+    const searchParams = new URLSearchParams({
+      q: title,
+      query_by: "title,otherNames",
+      include_fields: "id,title,otherNames,hidden",
+      filter_by: "hidden:=false",
+      per_page: "20",
+    });
+    const response = await fetch(`https://atsu.moe/collections/manga/documents/search?${searchParams.toString()}`, {
       headers: { accept: "application/json" },
     });
     if (!response.ok) {
@@ -2676,23 +2686,30 @@ async function searchAtsumaru(
 
     const payload = (await response.json()) as AtsuSearchResponse;
     for (const hit of payload.hits ?? []) {
-      if (hit.type && hit.type.toLowerCase() !== "manga") {
+      const document = hit.document;
+      if (!document?.id || document.hidden) {
         continue;
       }
 
-      const url = `https://atsu.moe/manga/${hit.id}`;
+      const titles = dedupeTitles([document.title ?? "", ...(document.otherNames ?? [])]);
+      if (titles.length === 0) {
+        continue;
+      }
+
+      const displayTitle = pickPreferredTitle(titles);
+      const url = `https://atsu.moe/manga/${document.id}`;
       if (rejectedUrlSet.has(url)) {
         continue;
       }
 
-      const score = scoreTitleMatch(hit.title, normalizedSourceTitles);
+      const score = Math.max(0, ...titles.map((entryTitle) => scoreTitleMatch(entryTitle, normalizedSourceTitles)));
       if (score < 90) {
         continue;
       }
 
-      const existingCandidate = candidates.get(hit.id);
+      const existingCandidate = candidates.get(document.id);
       if (!existingCandidate || score > existingCandidate.score) {
-        candidates.set(hit.id, { id: hit.id, title: hit.title, score });
+        candidates.set(document.id, { id: document.id, title: displayTitle, score });
       }
     }
   } catch {
