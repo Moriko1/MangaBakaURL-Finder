@@ -2,7 +2,7 @@
 
 Browser extension for matching MangaBaka series to provider URLs and searching MangaBaka from supported provider pages.
 
-Google: Link TBD
+Google: https://chromewebstore.google.com/detail/mangabaka-url-finder/akngneijkglanfogokinljffohnafhfb
 
 Firefox: Link TBD
 
