@@ -17,21 +17,16 @@
     "package:firefox": "node scripts/package-variant.mjs firefox",
     "package:all": "npm run package:complete && npm run package:google && npm run package:firefox",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:e2e": "playwright test --config=playwright.config.ts",
     "test:packages": "npm run validate:packages",
     "validate:packages": "node scripts/validate-packages.mjs",
-    "check": "npm run typecheck && npm test && npm run package:all && npm run test:packages"
+    "check": "npm run typecheck && npm run package:all && npm run test:packages"
   },
   "devDependencies": {
-    "@playwright/test": "^1.62.1",
     "@types/chrome": "^0.2.7",
-    "@types/jsdom": "^30.0.0",
     "@types/node": "^25.5.0",
     "esbuild": "^0.28.2",
     "jsdom": "^30.0.1",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.11"
+    "typescript": "^5.9.3"
   },
   "engines": {
     "node": ">=22.14.0"

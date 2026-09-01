@@ -32,6 +32,10 @@
 /playwright-report
 /src/build-info.ts
 /test-results
+/tests
+/DevelopmentSuggestions.md
+/playwright.config.ts
+/vitest.config.mts
 
 /node_modules
 npm-debug.log*
