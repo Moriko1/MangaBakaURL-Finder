@@ -1,25 +1,40 @@
 {
   "name": "mangabaka-url-finder",
-  "version": "1.5.2",
+  "version": "1.6.4",
   "description": "Find matching provider URLs for MangaBaka and search MangaBaka from supported provider pages.",
   "license": "SEE LICENSE IN LICENSE",
   "main": "dist/background.js",
   "scripts": {
     "clean": "node scripts/clean.mjs",
-    "build": "node scripts/update-build-info.mjs && npm run clean && tsc",
+    "build": "node scripts/build-variant.mjs complete --local",
     "build:all": "npm run build:complete && npm run build:google && npm run build:firefox",
-    "watch": "tsc --watch",
+    "watch": "node scripts/build-variant.mjs complete --local --watch",
     "build:complete": "node scripts/build-variant.mjs complete",
     "build:google": "node scripts/build-variant.mjs google",
     "build:firefox": "node scripts/build-variant.mjs firefox",
     "package:complete": "node scripts/package-variant.mjs complete",
     "package:google": "node scripts/package-variant.mjs google",
     "package:firefox": "node scripts/package-variant.mjs firefox",
-    "package:all": "npm run package:complete && npm run package:google && npm run package:firefox"
+    "package:all": "npm run package:complete && npm run package:google && npm run package:firefox",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:e2e": "playwright test --config=playwright.config.ts",
+    "test:packages": "npm run validate:packages",
+    "validate:packages": "node scripts/validate-packages.mjs",
+    "check": "npm run typecheck && npm test && npm run package:all && npm run test:packages"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@types/chrome": "^0.2.7",
+    "@types/jsdom": "^30.0.0",
     "@types/node": "^25.5.0",
-    "typescript": "^5.5.3"
+    "esbuild": "^0.28.2",
+    "jsdom": "^30.0.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  },
+  "engines": {
+    "node": ">=22.14.0"
   },
   "private": true
 }

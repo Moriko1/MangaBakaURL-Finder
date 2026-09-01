@@ -1,3 +1,16 @@
+import { isMangaBakaPageUrl } from "./mangabaka/url";
+import { runExtensionInstallMigrations } from "./background/install";
+import { createReleaseUpdateController, RELEASE_UPDATE_ALARM_NAME } from "./release/update";
+
+declare const __ADULT_PROVIDERS_ENABLED__: boolean;
+declare const __LOCAL_RELEASE_UPDATES_ENABLED__: boolean;
+
+type BackgroundProviderKey = "atsu" | "mangadex" | "mangafire" | "weebcentral" | "ehentai" | "exhentai" | "comixto";
+
+type BackgroundMessage =
+  | { protocolVersion: 1; type: "action:sync"; tabId: number; url?: string }
+  | { protocolVersion: 1; type: "release:ensure" };
+
 // noinspection JSUnusedGlobalSymbols
 const ACTIVE_ICON_ASSET_PATHS: Record<string, string> = {
   "16": "assets/icon-color-16.png",
@@ -14,52 +27,41 @@ const INACTIVE_ICON_ASSET_PATHS: Record<string, string> = {
 };
 
 const BACKGROUND_SETTINGS_KEY = "extension:settings";
-const RELEASE_UPDATE_STORAGE_KEY = "extension:release-update";
-const RELEASE_UPDATE_ATTEMPT_KEY = "extension:release-update-attempt";
-const RELEASE_UPDATE_ALARM_NAME = "extension:release-update-check";
-const GITHUB_RELEASES_LATEST_PAGE_URL = "https://github.com/Moriko1/MangaBakaURL-Finder/releases/latest";
-const GITHUB_RELEASES_LATEST_API_URL = "https://api.github.com/repos/Moriko1/MangaBakaURL-Finder/releases/latest";
 const BACKGROUND_DEFAULT_ENABLED_PROVIDERS = {
   atsu: true,
   mangadex: true,
-  ehentai: false,
-  exhentai: false,
   comixto: false,
   mangafire: false,
   weebcentral: false,
-};
+  ...(__ADULT_PROVIDERS_ENABLED__ ? { ehentai: false, exhentai: false } : {}),
+} as Record<BackgroundProviderKey, boolean>;
 const BACKGROUND_MANIFEST = chrome.runtime.getManifest();
-const BACKGROUND_EXTENSION_VERSION = BACKGROUND_MANIFEST.version;
-const BACKGROUND_EXTENSION_VERSION_NAME = BACKGROUND_MANIFEST.version_name ?? BACKGROUND_MANIFEST.version;
-
-interface ReleaseUpdateRecord {
-  checkedAt: string;
-  currentVersion: string;
-  latestVersion: string | null;
-  latestTagName: string | null;
-  latestReleaseUrl: string;
-  status: "up_to_date" | "update_available";
-}
-
-interface GitHubLatestReleaseResponse {
-  tag_name?: string;
-  html_url?: string;
-}
-
-interface LatestReleaseResolution {
-  latestTagName: string | null;
-  latestReleaseUrl: string;
-}
-
-interface ReleaseUpdateAttemptRecord {
-  attemptedAt: string;
-  currentVersion: string;
-}
+const releaseUpdates = __LOCAL_RELEASE_UPDATES_ENABLED__
+  ? createReleaseUpdateController({
+      currentVersion: BACKGROUND_MANIFEST.version,
+      versionName: BACKGROUND_MANIFEST.version_name ?? BACKGROUND_MANIFEST.version,
+      storage: chrome.storage.local,
+      alarms: chrome.alarms,
+      tabs: chrome.tabs,
+    })
+  : null;
 
 let activeIconImageDataPromise: Promise<Record<number, ImageData>> | null = null;
 let inactiveIconImageDataPromise: Promise<Record<number, ImageData>> | null = null;
-let releaseUpdateSyncPromise: Promise<void> | null = null;
-let pendingForcedReleaseUpdateSync = false;
+let enabledProvidersPromise: Promise<typeof BACKGROUND_DEFAULT_ENABLED_PROVIDERS> | null = null;
+let nextActionUpdateGeneration = 0;
+
+const actionUpdateGenerations = new Map<number, number>();
+const appliedActionStates = new Map<number, boolean>();
+const actionWriteQueues = new Map<number, Promise<void>>();
+
+function runBackgroundTask(description: string, task: () => Promise<unknown>): void {
+  void Promise.resolve()
+    .then(task)
+    .catch((error) => {
+      console.warn(`Failed to ${description}.`, error);
+    });
+}
 
 async function loadIconImageData(path: string, size: number): Promise<ImageData> {
   const response = await fetch(chrome.runtime.getURL(path));
@@ -68,15 +70,19 @@ async function loadIconImageData(path: string, size: number): Promise<ImageData>
   }
 
   const bitmap = await createImageBitmap(await response.blob());
-  const canvas = new OffscreenCanvas(size, size);
-  const context = canvas.getContext("2d");
-  if (!context) {
-    throw new Error("Unable to create icon canvas context.");
-  }
+  try {
+    const canvas = new OffscreenCanvas(size, size);
+    const context = canvas.getContext("2d");
+    if (!context) {
+      throw new Error("Unable to create icon canvas context.");
+    }
 
-  context.clearRect(0, 0, size, size);
-  context.drawImage(bitmap, 0, 0, size, size);
-  return context.getImageData(0, 0, size, size);
+    context.clearRect(0, 0, size, size);
+    context.drawImage(bitmap, 0, 0, size, size);
+    return context.getImageData(0, 0, size, size);
+  } finally {
+    bitmap.close();
+  }
 }
 
 async function loadIconSet(assetPaths: Record<string, string>): Promise<Record<number, ImageData>> {
@@ -102,364 +108,11 @@ function getActionIconImageData(isActive: boolean): Promise<Record<number, Image
   return inactiveIconImageDataPromise;
 }
 
-function isMangabakaUrl(url?: string): boolean {
-  if (!url) {
-    return false;
-  }
-
-  try {
-    return new URL(url).hostname === "mangabaka.org";
-  } catch {
-    return false;
-  }
-}
-
 function isMissingTabError(error: unknown): boolean {
   return error instanceof Error && /No tab with id|Tabs cannot be edited right now|tab was closed/i.test(error.message);
 }
 
-function isLocalInstallSource(): boolean {
-  return !/\((Google|Firefox)\)$/i.test(BACKGROUND_EXTENSION_VERSION_NAME);
-}
-
-function normalizeVersion(value: string | null | undefined): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  const match = value.trim().match(/^v?(\d+(?:\.\d+)*)/i);
-  return match?.[1] ?? null;
-}
-
-function compareVersions(left: string, right: string): number {
-  const leftParts = left.split(".").map((part) => Number.parseInt(part, 10));
-  const rightParts = right.split(".").map((part) => Number.parseInt(part, 10));
-  const maxLength = Math.max(leftParts.length, rightParts.length);
-
-  for (let index = 0; index < maxLength; index += 1) {
-    const leftPart = Number.isFinite(leftParts[index]) ? leftParts[index] : 0;
-    const rightPart = Number.isFinite(rightParts[index]) ? rightParts[index] : 0;
-    if (leftPart !== rightPart) {
-      return leftPart - rightPart;
-    }
-  }
-
-  return 0;
-}
-
-function extractReleaseTagFromUrl(url: string): string | null {
-  try {
-    const parsedUrl = new URL(url);
-    const segments = parsedUrl.pathname.split("/").filter(Boolean);
-    const tagIndex = segments.findIndex((segment) => segment === "tag");
-    return tagIndex >= 0 && segments[tagIndex + 1] ? decodeURIComponent(segments[tagIndex + 1]) : null;
-  } catch {
-    return null;
-  }
-}
-
-function getLastScheduledReleaseUpdateTime(reference = new Date()): number {
-  const scheduledTime = new Date(reference);
-  scheduledTime.setHours(2, 0, 0, 0);
-  if (reference.getTime() < scheduledTime.getTime()) {
-    scheduledTime.setDate(scheduledTime.getDate() - 1);
-  }
-  return scheduledTime.getTime();
-}
-
-function getNextScheduledReleaseUpdateTime(reference = new Date()): number {
-  const scheduledTime = new Date(reference);
-  scheduledTime.setHours(2, 0, 0, 0);
-  if (reference.getTime() >= scheduledTime.getTime()) {
-    scheduledTime.setDate(scheduledTime.getDate() + 1);
-  }
-  return scheduledTime.getTime();
-}
-
-function isNullableString(value: unknown): value is string | null | undefined {
-  return value == null || typeof value === "string";
-}
-
-function isReleaseUpdateRecord(value: unknown): value is ReleaseUpdateRecord {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-
-  const record = value as Record<string, unknown>;
-  return (
-    typeof record.checkedAt === "string"
-    && typeof record.currentVersion === "string"
-    && typeof record.latestReleaseUrl === "string"
-    && isNullableString(record.latestVersion)
-    && isNullableString(record.latestTagName)
-    && (record.status === "up_to_date" || record.status === "update_available")
-  );
-}
-
-function isReleaseUpdateAttemptRecord(value: unknown): value is ReleaseUpdateAttemptRecord {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-
-  const record = value as Record<string, unknown>;
-  return typeof record.attemptedAt === "string" && typeof record.currentVersion === "string";
-}
-
-async function closeReleaseCheckTab(tabId: number): Promise<void> {
-  try {
-    await chrome.tabs.remove(tabId);
-  } catch (error) {
-    if (!isMissingTabError(error)) {
-      console.warn("Failed to close the latest-release check tab.", error);
-    }
-  }
-}
-
-async function loadReleaseUpdateRecord(): Promise<ReleaseUpdateRecord | null> {
-  const stored = await chrome.storage.local.get(RELEASE_UPDATE_STORAGE_KEY);
-  return isReleaseUpdateRecord(stored[RELEASE_UPDATE_STORAGE_KEY]) ? stored[RELEASE_UPDATE_STORAGE_KEY] : null;
-}
-
-async function loadReleaseUpdateAttemptRecord(): Promise<ReleaseUpdateAttemptRecord | null> {
-  const stored = await chrome.storage.local.get(RELEASE_UPDATE_ATTEMPT_KEY);
-  return isReleaseUpdateAttemptRecord(stored[RELEASE_UPDATE_ATTEMPT_KEY]) ? stored[RELEASE_UPDATE_ATTEMPT_KEY] : null;
-}
-
-async function saveReleaseUpdateAttemptRecord(attemptedAt: string, currentVersion: string): Promise<void> {
-  await chrome.storage.local.set({
-    [RELEASE_UPDATE_ATTEMPT_KEY]: {
-      attemptedAt,
-      currentVersion,
-    } satisfies ReleaseUpdateAttemptRecord,
-  });
-}
-
-async function clearReleaseUpdateState(): Promise<void> {
-  await chrome.alarms.clear(RELEASE_UPDATE_ALARM_NAME);
-  await chrome.storage.local.remove([RELEASE_UPDATE_STORAGE_KEY, RELEASE_UPDATE_ATTEMPT_KEY]);
-}
-
-async function scheduleNextReleaseUpdateCheck(): Promise<void> {
-  if (!isLocalInstallSource()) {
-    await chrome.alarms.clear(RELEASE_UPDATE_ALARM_NAME);
-    return;
-  }
-
-  await chrome.alarms.create(RELEASE_UPDATE_ALARM_NAME, {
-    when: getNextScheduledReleaseUpdateTime(),
-  });
-}
-
-async function shouldCheckLatestRelease(): Promise<boolean> {
-  const currentVersion = normalizeVersion(BACKGROUND_EXTENSION_VERSION) ?? BACKGROUND_EXTENSION_VERSION;
-  const record = await loadReleaseUpdateRecord();
-  if (record && record.currentVersion === currentVersion) {
-    const checkedAt = Date.parse(record.checkedAt);
-    if (Number.isFinite(checkedAt)) {
-      return checkedAt < getLastScheduledReleaseUpdateTime();
-    }
-  }
-
-  const attemptRecord = await loadReleaseUpdateAttemptRecord();
-  if (!attemptRecord || attemptRecord.currentVersion !== currentVersion) {
-    return true;
-  }
-
-  const attemptedAt = Date.parse(attemptRecord.attemptedAt);
-  if (!Number.isFinite(attemptedAt)) {
-    return true;
-  }
-
-  return attemptedAt < getLastScheduledReleaseUpdateTime();
-}
-
-async function fetchLatestReleaseFromApi(): Promise<LatestReleaseResolution> {
-  const response = await fetch(GITHUB_RELEASES_LATEST_API_URL, {
-    headers: {
-      Accept: "application/vnd.github+json",
-    },
-  });
-  if (!response.ok) {
-    throw new Error(`GitHub latest release request failed with status ${response.status}.`);
-  }
-
-  const payload = await response.json() as GitHubLatestReleaseResponse;
-  return {
-    latestTagName: typeof payload.tag_name === "string" && payload.tag_name.trim() ? payload.tag_name.trim() : null,
-    latestReleaseUrl: typeof payload.html_url === "string" && payload.html_url.trim()
-      ? payload.html_url.trim()
-      : GITHUB_RELEASES_LATEST_PAGE_URL,
-  };
-}
-
-async function waitForTabToFinishLoading(tabId: number, timeoutMs = 15000): Promise<{ url?: string; status?: string }> {
-  return new Promise((resolve, reject) => {
-    const timeoutId = globalThis.setTimeout(() => {
-      cleanup();
-      reject(new Error("Timed out while resolving the latest GitHub release URL."));
-    }, timeoutMs);
-
-    // noinspection JSDeprecatedSymbols
-    const cleanup = (): void => {
-      globalThis.clearTimeout(timeoutId);
-      // noinspection JSDeprecatedSymbols
-      chrome.tabs.onUpdated.removeListener(handleUpdated);
-      // noinspection JSDeprecatedSymbols
-      chrome.tabs.onRemoved.removeListener(handleRemoved);
-    };
-
-    const handleUpdated = (updatedTabId: number, changeInfo: { status?: string }): void => {
-      if (updatedTabId !== tabId || changeInfo.status !== "complete") {
-        return;
-      }
-
-      void resolveCurrentTab();
-    };
-
-    const handleRemoved = (removedTabId: number): void => {
-      if (removedTabId !== tabId) {
-        return;
-      }
-
-      cleanup();
-      reject(new Error("The latest-release check tab was closed before it finished loading."));
-    };
-
-    const resolveCurrentTab = async (): Promise<void> => {
-      try {
-        const tab = await chrome.tabs.get(tabId);
-        if (tab.status !== "complete") {
-          return;
-        }
-
-        cleanup();
-        resolve(tab);
-      } catch (error) {
-        cleanup();
-        reject(error);
-      }
-    };
-
-    // noinspection JSDeprecatedSymbols
-    chrome.tabs.onUpdated.addListener(handleUpdated);
-    // noinspection JSDeprecatedSymbols
-    chrome.tabs.onRemoved.addListener(handleRemoved);
-    void resolveCurrentTab();
-  });
-}
-
-async function resolveLatestReleaseViaTab(): Promise<LatestReleaseResolution> {
-  const existingTabs = await chrome.tabs.query({});
-  const hostTab = existingTabs.find((tab: { windowId?: number }) => typeof tab.windowId === "number");
-  if (!hostTab || typeof hostTab.windowId !== "number") {
-    throw new Error("No browser window is available to resolve the latest GitHub release.");
-  }
-
-  const releaseTab = await chrome.tabs.create({
-    url: GITHUB_RELEASES_LATEST_PAGE_URL,
-    active: false,
-    windowId: hostTab.windowId,
-  });
-  const releaseTabId = typeof releaseTab.id === "number" ? releaseTab.id : null;
-  if (releaseTabId == null) {
-    throw new Error("Unable to create the latest-release check tab.");
-  }
-
-  try {
-    const resolvedTab = await waitForTabToFinishLoading(releaseTabId);
-    const latestReleaseUrl = resolvedTab.url ?? GITHUB_RELEASES_LATEST_PAGE_URL;
-    const latestTagName = extractReleaseTagFromUrl(latestReleaseUrl);
-    if (!latestTagName) {
-      throw new Error(`GitHub did not resolve the latest release to a tag URL: ${latestReleaseUrl}`);
-    }
-
-    return { latestTagName, latestReleaseUrl };
-  } finally {
-    await closeReleaseCheckTab(releaseTabId);
-  }
-}
-
-async function fetchAndStoreLatestReleaseUpdate(checkedAt: string): Promise<void> {
-  let latestRelease: LatestReleaseResolution;
-  try {
-    latestRelease = await fetchLatestReleaseFromApi();
-    if (!latestRelease.latestTagName) {
-      latestRelease = await resolveLatestReleaseViaTab();
-    }
-  } catch {
-    latestRelease = await resolveLatestReleaseViaTab();
-  }
-
-  const latestTagName = latestRelease.latestTagName;
-  const latestReleaseUrl = latestRelease.latestReleaseUrl;
-  const currentVersion = normalizeVersion(BACKGROUND_EXTENSION_VERSION) ?? BACKGROUND_EXTENSION_VERSION;
-  const latestVersion = normalizeVersion(latestTagName);
-  const hasUpdate = latestVersion != null && compareVersions(currentVersion, latestVersion) < 0;
-
-  const record: ReleaseUpdateRecord = {
-    checkedAt,
-    currentVersion,
-    latestVersion,
-    latestTagName,
-    latestReleaseUrl,
-    status: hasUpdate ? "update_available" : "up_to_date",
-  };
-
-  await chrome.storage.local.set({
-    [RELEASE_UPDATE_STORAGE_KEY]: record,
-  });
-}
-
-async function syncReleaseUpdateSchedule(forceCheck = false): Promise<void> {
-  pendingForcedReleaseUpdateSync = pendingForcedReleaseUpdateSync || forceCheck;
-  if (releaseUpdateSyncPromise) {
-    return releaseUpdateSyncPromise;
-  }
-
-  releaseUpdateSyncPromise = (async () => {
-    do {
-      const runForceCheck = pendingForcedReleaseUpdateSync;
-      pendingForcedReleaseUpdateSync = false;
-
-      if (!isLocalInstallSource()) {
-        await clearReleaseUpdateState();
-        return;
-      }
-
-      await scheduleNextReleaseUpdateCheck();
-      if (runForceCheck || (await shouldCheckLatestRelease())) {
-        const currentVersion = normalizeVersion(BACKGROUND_EXTENSION_VERSION) ?? BACKGROUND_EXTENSION_VERSION;
-        const attemptedAt = new Date().toISOString();
-        await saveReleaseUpdateAttemptRecord(attemptedAt, currentVersion);
-        try {
-          await fetchAndStoreLatestReleaseUpdate(attemptedAt);
-        } catch (error) {
-          console.warn("Failed to check the latest GitHub release.", error);
-        }
-      }
-
-      await scheduleNextReleaseUpdateCheck();
-    } while (pendingForcedReleaseUpdateSync);
-  })().finally(() => {
-    releaseUpdateSyncPromise = null;
-  });
-
-  return releaseUpdateSyncPromise;
-}
-
-async function ensureReleaseUpdateStatus(): Promise<void> {
-  if (!isLocalInstallSource()) {
-    await clearReleaseUpdateState();
-    return;
-  }
-
-  const currentVersion = normalizeVersion(BACKGROUND_EXTENSION_VERSION) ?? BACKGROUND_EXTENSION_VERSION;
-  const record = await loadReleaseUpdateRecord();
-  const hasCurrentRecord = record?.currentVersion === currentVersion;
-  await syncReleaseUpdateSchedule(!hasCurrentRecord);
-}
-
-function getProviderKeyForUrl(url?: string): keyof typeof BACKGROUND_DEFAULT_ENABLED_PROVIDERS | null {
+function getProviderKeyForUrl(url?: string): BackgroundProviderKey | null {
   if (!url) {
     return null;
   }
@@ -475,11 +128,15 @@ function getProviderKeyForUrl(url?: string): keyof typeof BACKGROUND_DEFAULT_ENA
         return "mangafire";
       case "weebcentral.com":
         return "weebcentral";
-      case "e-hentai.org":
-        return "ehentai";
-      case "exhentai.org":
-        return "exhentai";
       default:
+        if (__ADULT_PROVIDERS_ENABLED__) {
+          if (parsedUrl.hostname === "e-hentai.org") {
+            return "ehentai";
+          }
+          if (parsedUrl.hostname === "exhentai.org") {
+            return "exhentai";
+          }
+        }
         return null;
     }
   } catch {
@@ -487,122 +144,259 @@ function getProviderKeyForUrl(url?: string): keyof typeof BACKGROUND_DEFAULT_ENA
   }
 }
 
-async function loadEnabledProviders(): Promise<typeof BACKGROUND_DEFAULT_ENABLED_PROVIDERS> {
-  const stored = await chrome.storage.local.get(BACKGROUND_SETTINGS_KEY);
-  const settings =
-    stored[BACKGROUND_SETTINGS_KEY] as { enabledProviders?: Partial<typeof BACKGROUND_DEFAULT_ENABLED_PROVIDERS> } | undefined;
-  return {
-    ...BACKGROUND_DEFAULT_ENABLED_PROVIDERS,
-    ...settings?.enabledProviders,
-    comixto: false,
-  };
+function loadEnabledProviders(): Promise<typeof BACKGROUND_DEFAULT_ENABLED_PROVIDERS> {
+  if (enabledProvidersPromise) {
+    return enabledProvidersPromise;
+  }
+
+  const loadPromise = chrome.storage.local.get(BACKGROUND_SETTINGS_KEY)
+    .then((stored) => {
+      const settings =
+        stored[BACKGROUND_SETTINGS_KEY] as { enabledProviders?: Partial<typeof BACKGROUND_DEFAULT_ENABLED_PROVIDERS> } | undefined;
+      return {
+        ...BACKGROUND_DEFAULT_ENABLED_PROVIDERS,
+        ...settings?.enabledProviders,
+        comixto: false,
+      };
+    });
+  const cachedPromise = loadPromise.catch((error) => {
+      if (enabledProvidersPromise === cachedPromise) {
+        enabledProvidersPromise = null;
+      }
+      throw error;
+    });
+  enabledProvidersPromise = cachedPromise;
+  return cachedPromise;
 }
 
-async function updateActionForTab(tabId: number, url?: string): Promise<void> {
-  const enabledProviders = await loadEnabledProviders();
-  const providerKey = getProviderKeyForUrl(url);
-  const isActive = isMangabakaUrl(url) || (providerKey != null && enabledProviders[providerKey]);
-  try {
-    await chrome.action.setIcon({
-      tabId,
-      imageData: await getActionIconImageData(isActive),
-    });
-  } catch (error) {
-    if (isMissingTabError(error)) {
+function invalidateEnabledProviders(): void {
+  enabledProvidersPromise = null;
+}
+
+function beginActionUpdate(tabId: number): number {
+  const generation = ++nextActionUpdateGeneration;
+  actionUpdateGenerations.set(tabId, generation);
+  return generation;
+}
+
+function isCurrentActionUpdate(tabId: number, generation: number): boolean {
+  return actionUpdateGenerations.get(tabId) === generation;
+}
+
+function forgetActionStateForTab(tabId: number): void {
+  actionUpdateGenerations.delete(tabId);
+  appliedActionStates.delete(tabId);
+}
+
+async function applyActionState(tabId: number, generation: number, isActive: boolean): Promise<void> {
+  if (!isCurrentActionUpdate(tabId, generation) || appliedActionStates.get(tabId) === isActive) {
+    return;
+  }
+
+  const imageData = await getActionIconImageData(isActive);
+  if (!isCurrentActionUpdate(tabId, generation) || appliedActionStates.get(tabId) === isActive) {
+    return;
+  }
+
+  const previousWrite = actionWriteQueues.get(tabId) ?? Promise.resolve();
+  const write = previousWrite.catch(() => undefined).then(async () => {
+    if (!isCurrentActionUpdate(tabId, generation) || appliedActionStates.get(tabId) === isActive) {
       return;
     }
 
-    console.warn("Failed to update the action icon from image data. Falling back to asset paths.", error);
+    let iconApplied = false;
     try {
-      await chrome.action.setIcon({
-        tabId,
-        path: isActive ? ACTIVE_ICON_ASSET_PATHS : INACTIVE_ICON_ASSET_PATHS,
-      });
-    } catch (fallbackError) {
-      if (isMissingTabError(fallbackError)) {
+      await chrome.action.setIcon({ tabId, imageData });
+      iconApplied = true;
+    } catch (error) {
+      if (isMissingTabError(error)) {
+        if (isCurrentActionUpdate(tabId, generation)) {
+          forgetActionStateForTab(tabId);
+        }
         return;
       }
 
-      console.warn("Failed to update the action icon from asset paths.", fallbackError);
+      console.warn("Failed to update the action icon from image data. Falling back to asset paths.", error);
+      if (!isCurrentActionUpdate(tabId, generation)) {
+        return;
+      }
+
+      try {
+        await chrome.action.setIcon({
+          tabId,
+          path: isActive ? ACTIVE_ICON_ASSET_PATHS : INACTIVE_ICON_ASSET_PATHS,
+        });
+        iconApplied = true;
+      } catch (fallbackError) {
+        if (isMissingTabError(fallbackError)) {
+          if (isCurrentActionUpdate(tabId, generation)) {
+            forgetActionStateForTab(tabId);
+          }
+          return;
+        }
+
+        console.warn("Failed to update the action icon from asset paths.", fallbackError);
+      }
+    }
+
+    if (!isCurrentActionUpdate(tabId, generation)) {
+      return;
+    }
+
+    let titleApplied = false;
+    try {
+      await chrome.action.setTitle({
+        tabId,
+        title: isActive ? "MangaBaka URL Finder" : "MangaBaka URL Finder (inactive on this page)",
+      });
+      titleApplied = true;
+    } catch (error) {
+      if (isMissingTabError(error)) {
+        if (isCurrentActionUpdate(tabId, generation)) {
+          forgetActionStateForTab(tabId);
+        }
+        return;
+      }
+
+      console.warn("Failed to update the action title.", error);
+    }
+
+    if (iconApplied && titleApplied && isCurrentActionUpdate(tabId, generation)) {
+      appliedActionStates.set(tabId, isActive);
+    }
+  });
+
+  actionWriteQueues.set(tabId, write);
+  try {
+    await write;
+  } finally {
+    if (actionWriteQueues.get(tabId) === write) {
+      actionWriteQueues.delete(tabId);
     }
   }
+}
 
+async function updateActionForTabAtGeneration(
+  tabId: number,
+  url: string | undefined,
+  generation: number,
+  enabledProviders?: typeof BACKGROUND_DEFAULT_ENABLED_PROVIDERS,
+): Promise<void> {
+  const providers = enabledProviders ?? await loadEnabledProviders();
+  if (!isCurrentActionUpdate(tabId, generation)) {
+    return;
+  }
+
+  const providerKey = getProviderKeyForUrl(url);
+  const isActive = Boolean(url && isMangaBakaPageUrl(url)) || (providerKey != null && providers[providerKey]);
+  await applyActionState(tabId, generation, isActive);
+}
+
+function updateActionForTab(
+  tabId: number,
+  url: string | undefined,
+  enabledProviders?: typeof BACKGROUND_DEFAULT_ENABLED_PROVIDERS,
+): Promise<void> {
+  return updateActionForTabAtGeneration(tabId, url, beginActionUpdate(tabId), enabledProviders);
+}
+
+async function updateActionForCurrentTab(tabId: number): Promise<void> {
+  const generation = beginActionUpdate(tabId);
   try {
-    await chrome.action.setTitle({
-      tabId,
-      title: isActive ? "MangaBaka URL Finder" : "MangaBaka URL Finder (inactive on this page)",
-    });
+    const tab = await chrome.tabs.get(tabId);
+    await updateActionForTabAtGeneration(tabId, tab.url, generation);
   } catch (error) {
     if (!isMissingTabError(error)) {
-      console.warn("Failed to update the action title.", error);
+      throw error;
+    }
+
+    if (isCurrentActionUpdate(tabId, generation)) {
+      forgetActionStateForTab(tabId);
     }
   }
 }
 
 async function refreshAllTabs(): Promise<void> {
+  const enabledProviders = await loadEnabledProviders();
   const tabs = await chrome.tabs.query({});
   await Promise.all(
     tabs
       .filter((tab: { id?: number }) => typeof tab.id === "number")
-      .map((tab: { id?: number; url?: string }) => updateActionForTab(tab.id as number, tab.url)),
+      .map((tab: { id?: number; url?: string }) => updateActionForTab(tab.id as number, tab.url, enabledProviders)),
   );
 }
 
-void refreshAllTabs();
-
 // noinspection JSDeprecatedSymbols
-chrome.runtime.onInstalled.addListener(() => {
-  void refreshAllTabs();
-  void syncReleaseUpdateSchedule();
+chrome.runtime.onInstalled.addListener((details) => {
+  runBackgroundTask("refresh action states after extension installation", refreshAllTabs);
+  if (releaseUpdates) {
+    runBackgroundTask("sync the release-update schedule after extension installation", () => releaseUpdates.syncSchedule());
+  }
+  runBackgroundTask(
+    "migrate lookup cache storage during extension update",
+    () => runExtensionInstallMigrations(details.reason, chrome.storage.local),
+  );
 });
 
 // noinspection JSDeprecatedSymbols
 chrome.runtime.onStartup.addListener(() => {
-  void refreshAllTabs();
-  void syncReleaseUpdateSchedule();
+  runBackgroundTask("refresh action states during browser startup", refreshAllTabs);
+  if (releaseUpdates) {
+    runBackgroundTask("sync the release-update schedule during browser startup", () => releaseUpdates.syncSchedule());
+  }
 });
 
 // noinspection JSDeprecatedSymbols
-chrome.tabs.onActivated.addListener(async ({ tabId }: { tabId: number }) => {
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    await updateActionForTab(tabId, tab.url);
-  } catch (error) {
-    if (!isMissingTabError(error)) {
-      throw error;
-    }
-  }
+chrome.tabs.onActivated.addListener(({ tabId }: { tabId: number }) => {
+  runBackgroundTask("refresh the activated tab action state", () => updateActionForCurrentTab(tabId));
 });
 
 // noinspection JSDeprecatedSymbols
 chrome.tabs.onUpdated.addListener((tabId: number, changeInfo: { url?: string; status?: string }, tab: { url?: string }) => {
   if (changeInfo.url || changeInfo.status === "complete") {
-    void updateActionForTab(tabId, changeInfo.url ?? tab.url);
+    runBackgroundTask("refresh an updated tab action state", () => updateActionForTab(tabId, changeInfo.url ?? tab.url));
   }
+});
+
+// noinspection JSDeprecatedSymbols
+chrome.tabs.onRemoved.addListener((tabId: number) => {
+  forgetActionStateForTab(tabId);
 });
 
 // noinspection JSDeprecatedSymbols
 chrome.storage.onChanged.addListener((changes: Record<string, { newValue?: unknown }>, areaName: string) => {
   if (areaName === "local" && BACKGROUND_SETTINGS_KEY in changes) {
-    void refreshAllTabs();
+    invalidateEnabledProviders();
+    runBackgroundTask("refresh action states after a settings change", refreshAllTabs);
   }
 });
 
-// noinspection JSDeprecatedSymbols
-chrome.alarms.onAlarm.addListener((alarm: { name?: string }) => {
-  if (alarm.name === RELEASE_UPDATE_ALARM_NAME) {
-    void syncReleaseUpdateSchedule(true);
-  }
-});
+if (__LOCAL_RELEASE_UPDATES_ENABLED__ && releaseUpdates) {
+  // noinspection JSDeprecatedSymbols
+  chrome.alarms.onAlarm.addListener((alarm: { name?: string }) => {
+    if (alarm.name === RELEASE_UPDATE_ALARM_NAME) {
+      runBackgroundTask("sync the scheduled release-update check", () => releaseUpdates.syncSchedule(true));
+    }
+  });
+}
 
 // noinspection JSDeprecatedSymbols
-chrome.runtime.onMessage.addListener((message: { type?: string; tabId?: number; url?: string }) => {
-  if (message.type === "sync-action-icon" && typeof message.tabId === "number") {
-    void updateActionForTab(message.tabId, message.url);
+chrome.runtime.onMessage.addListener((rawMessage: unknown) => {
+  if (!rawMessage || typeof rawMessage !== "object") {
     return;
   }
 
-  if (message.type === "ensure-release-update-status") {
-    void ensureReleaseUpdateStatus();
+  const message = rawMessage as Partial<BackgroundMessage>;
+  if (message.protocolVersion !== 1) {
+    return;
+  }
+
+  if (message.type === "action:sync" && typeof message.tabId === "number") {
+    runBackgroundTask("refresh the requested tab action state", () => updateActionForCurrentTab(message.tabId as number));
+    return;
+  }
+
+  if (message.type === "release:ensure" && releaseUpdates) {
+    runBackgroundTask("ensure the release-update status", () => releaseUpdates.ensureStatus());
   }
 });

@@ -1,3 +1,53 @@
+import type {
+  ProviderId,
+  ProviderOutcome,
+  ProviderSearchCandidate,
+  ProviderSearchRequest,
+} from "./providers/types";
+import { fetchProviderSearchRequest, fetchProviderText } from "./providers/fetch";
+import { resolveStableProviderOutcome } from "./providers/cache";
+import { isStableProviderSearchOutcome, transitionProviderSearch } from "./providers/transition";
+import {
+  buildAtsumaruMangaPageRequest,
+  parseAtsumaruLatestChapterResponse,
+} from "./providers/atsumaru";
+import {
+  buildMangaDexChapterMetadataRequest,
+  buildMangaDexChapterFeedRequest,
+  buildMangaDexTitleMetadataRequest,
+  classifyMangaDexChapterAvailability,
+  parseMangaDexChapterSeriesResponse,
+  parseMangaDexChapterFeedResponse,
+  parseMangaDexSeriesTitlesResponse,
+  parseMangaDexTitleMetadataResponse,
+} from "./providers/mangadex";
+import { getProviderAdapter, matchProviderPage as matchRegisteredProviderPage } from "./providers/registry";
+
+declare const __ADULT_PROVIDERS_ENABLED__: boolean;
+
+import type {
+  MangaBakaSeriesPageContext,
+  ProviderPageContext as ActiveProviderPageContext,
+} from "./domain/active-page";
+import { resolveDisplayTitle, resolveSeriesTitles } from "./domain/titles";
+import {
+  createTitleFingerprint,
+  getLookupCacheKey,
+  isLookupCacheV12,
+  LOOKUP_CACHE_PREFIX,
+  LOOKUP_CACHE_SCHEMA_VERSION,
+  migrateLookupCacheStorage,
+  shouldInvalidateProviderResults,
+  type CachedMangaBakaSeries,
+  type LookupCacheV12,
+} from "./lookup/cache";
+import { MangaBakaApiClient, MangaBakaApiError, type MangaBakaSeries } from "./mangabaka/api";
+import { parseMangaBakaSeriesUrl } from "./mangabaka/url";
+import { PageContextClient } from "./popup/page-context-client";
+import { getPopupStatusPresentation, resolvePopupRoute } from "./popup/controller";
+
+declare const __BUILD_VARIANT__: "complete" | "google" | "firefox";
+
 // noinspection JSUnusedGlobalSymbols
 interface MangaBakaMetadata {
   seriesId: string;
@@ -5,6 +55,7 @@ interface MangaBakaMetadata {
   primaryTitle: string;
   titles: string[];
   authors: string[];
+  apiSeries: MangaBakaSeries;
 }
 
 interface ProviderMatch {
@@ -39,12 +90,9 @@ interface RejectedProviderUrls {
 }
 
 interface CachedLookup {
-  version: 11;
-  seriesId: string;
-  sourceUrl: string;
-  primaryTitle: string;
-  titles: string[];
-  authors: string[];
+  schemaVersion: 12;
+  series: CachedMangaBakaSeries;
+  providers: Record<string, unknown>;
   results: LookupResults;
   rejectedUrls: RejectedProviderUrls;
   titleAttemptIndexes: Record<ProviderKey, number>;
@@ -122,6 +170,7 @@ interface ExtensionSettings {
   enabledProviders: Record<ProviderKey, boolean>;
   providerLabelMode: "titles" | "icons" | "stacked";
   mangaBakaLinkType: LinkTargetType;
+  searchLinkType: LinkTargetType;
   providerLinkType: LinkTargetType;
   optionsPanelTab: OptionsPanelTab;
   mangaBakaButtonTarget: MangaBakaButtonTarget;
@@ -138,16 +187,9 @@ type StoredMangaDexChapterState = Exclude<MangaDexChapterState, "available">;
 type MangaDexStatusIconKey = "slight-smile" | "melting-face" | "clown-face" | "pensive";
 type StatusTone = "idle" | "loading" | "success" | "error";
 type PopupViewState = "unsupported" | "invalid" | "loading" | "lookup" | "provider" | "error";
+type ProviderSearchOutcome = ProviderOutcome<ProviderMatch>;
 
-interface ProviderPageContext {
-  providerKey: ProviderKey;
-  providerLabel: ProviderMatch["provider"];
-  pageType: "series" | "chapter" | null;
-  primaryTitle: string;
-  titles: string[];
-  sourceUrl: string;
-  isSearchable: boolean;
-}
+type ProviderPageContext = ActiveProviderPageContext<ProviderKey, ProviderMatch["provider"]>;
 
 interface PendingConfirmation {
   button: HTMLButtonElement;
@@ -192,79 +234,93 @@ class InvalidMangaBakaPageError extends Error {
   }
 }
 
-const CACHE_VERSION = 11;
+const CACHE_VERSION = LOOKUP_CACHE_SCHEMA_VERSION;
 const SETTINGS_KEY = "extension:settings";
 const POPUP_RELEASE_UPDATE_STORAGE_KEY = "extension:release-update";
 const LOCAL_INSTALL_SOURCE_URL = "https://github.com/Moriko1/MangaBakaURL-Finder/releases/latest";
 const GOOGLE_INSTALL_SOURCE_URL = "https://chromewebstore.google.com/detail/mangabaka-url-finder/akngneijkglanfogokinljffohnafhfb";
-const PROVIDER_KEYS: ProviderKey[] = ["atsu", "mangadex", "ehentai", "exhentai", "comixto", "mangafire", "weebcentral"];
+const PROVIDER_KEYS: ProviderKey[] = [
+  "atsu",
+  "mangadex",
+  "comixto",
+  "mangafire",
+  "weebcentral",
+  ...(__ADULT_PROVIDERS_ENABLED__ ? ["ehentai", "exhentai"] as ProviderKey[] : []),
+];
 const PROVIDERS: Array<{ key: ProviderKey; label: ProviderMatch["provider"] }> = [
   { key: "atsu", label: "Atsumaru" },
   { key: "mangadex", label: "MangaDex" },
-  { key: "ehentai", label: "E-Hentai" },
-  { key: "exhentai", label: "ExHentai" },
   { key: "comixto", label: "Comix" },
   { key: "mangafire", label: "MangaFire" },
   { key: "weebcentral", label: "WeebCentral" },
+  ...(__ADULT_PROVIDERS_ENABLED__
+    ? [
+        { key: "ehentai" as const, label: "E-Hentai" as const },
+        { key: "exhentai" as const, label: "ExHentai" as const },
+      ]
+    : []),
 ];
 const PROVIDER_LABELS: Record<ProviderKey, ProviderMatch["provider"]> = Object.fromEntries(
   PROVIDERS.map((provider) => [provider.key, provider.label]),
 ) as Record<ProviderKey, ProviderMatch["provider"]>;
-const VISIBLE_PROVIDER_KEYS: ProviderKey[] = ["atsu", "mangadex", "mangafire", "weebcentral", "ehentai", "exhentai"];
+const VISIBLE_PROVIDER_KEYS: ProviderKey[] = [
+  "atsu",
+  "mangadex",
+  "mangafire",
+  "weebcentral",
+  ...(__ADULT_PROVIDERS_ENABLED__ ? ["ehentai", "exhentai"] as ProviderKey[] : []),
+];
 const PROVIDER_ICON_EXTENSIONS: Record<ProviderKey, string> = {
   atsu: "ico",
   mangadex: "ico",
-  ehentai: "ico",
-  exhentai: "ico",
   comixto: "ico",
   mangafire: "png",
   weebcentral: "ico",
-};
+  ...(__ADULT_PROVIDERS_ENABLED__ ? { ehentai: "ico", exhentai: "ico" } : {}),
+} as Record<ProviderKey, string>;
 const DEFAULT_ENABLED_PROVIDERS: Record<ProviderKey, boolean> = {
   atsu: true,
   mangadex: true,
-  ehentai: false,
-  exhentai: false,
   comixto: false,
   mangafire: false,
   weebcentral: false,
-};
+  ...(__ADULT_PROVIDERS_ENABLED__ ? { ehentai: false, exhentai: false } : {}),
+} as Record<ProviderKey, boolean>;
 const DEFAULT_PROVIDER_LABEL_MODE: ProviderLabelMode = "titles";
 const DEFAULT_MANGABAKA_LINK_TARGET_TYPE: LinkTargetType = "current";
+const DEFAULT_SEARCH_LINK_TARGET_TYPE: LinkTargetType = "new";
 const DEFAULT_PROVIDER_LINK_TARGET_TYPE: LinkTargetType = "new";
 const DEFAULT_OPTIONS_PANEL_TAB: OptionsPanelTab = "providers";
 const DEFAULT_MANGABAKA_BUTTON_TARGET: MangaBakaButtonTarget = "root";
 const EMPTY_LOOKUP_RESULTS: LookupResults = {
   atsu: null,
   mangadex: null,
-  ehentai: null,
-  exhentai: null,
   comixto: null,
   mangafire: null,
   weebcentral: null,
-};
+  ...(__ADULT_PROVIDERS_ENABLED__ ? { ehentai: null, exhentai: null } : {}),
+} as LookupResults;
 const EMPTY_REJECTED_PROVIDER_URLS: RejectedProviderUrls = {
   atsu: [],
   mangadex: [],
-  ehentai: [],
-  exhentai: [],
   comixto: [],
   mangafire: [],
   weebcentral: [],
-};
+  ...(__ADULT_PROVIDERS_ENABLED__ ? { ehentai: [], exhentai: [] } : {}),
+} as RejectedProviderUrls;
 const EMPTY_TITLE_ATTEMPT_INDEXES: Record<ProviderKey, number> = {
   atsu: 0,
   mangadex: 0,
-  ehentai: 0,
-  exhentai: 0,
   comixto: 0,
   mangafire: 0,
   weebcentral: 0,
-};
+  ...(__ADULT_PROVIDERS_ENABLED__ ? { ehentai: 0, exhentai: 0 } : {}),
+} as Record<ProviderKey, number>;
 const DEFAULT_SETTINGS: ExtensionSettings = {
   enabledProviders: { ...DEFAULT_ENABLED_PROVIDERS },
   providerLabelMode: DEFAULT_PROVIDER_LABEL_MODE,
   mangaBakaLinkType: DEFAULT_MANGABAKA_LINK_TARGET_TYPE,
+  searchLinkType: DEFAULT_SEARCH_LINK_TARGET_TYPE,
   providerLinkType: DEFAULT_PROVIDER_LINK_TARGET_TYPE,
   optionsPanelTab: DEFAULT_OPTIONS_PANEL_TAB,
   mangaBakaButtonTarget: DEFAULT_MANGABAKA_BUTTON_TARGET,
@@ -396,12 +452,16 @@ const INCORRECT_ICON = `
 let currentSourceUrl = "";
 let currentTabId: number | null = null;
 let currentCache: CachedLookup | null = null;
+let currentPageContext: MangaBakaSeriesPageContext | null = null;
+let currentPageContextClient: PageContextClient | null = null;
 let currentCachedResultFlags: Partial<Record<ProviderKey, boolean>> = {};
+let currentProviderSearchOutcomes: Partial<Record<ProviderKey, ProviderSearchOutcome>> = {};
 let pendingConfirmation: PendingConfirmation | null = null;
 let currentSettings: ExtensionSettings = DEFAULT_SETTINGS;
 let retryCountdowns: Partial<Record<ProviderKey, number>> = {};
 let retryInProgress: Partial<Record<ProviderKey, boolean>> = {};
 let armedReadLinkSaves: Partial<Record<ProviderKey, string>> = {};
+let readLinkSaveInProgress: ProviderKey | null = null;
 let currentViewState: PopupViewState = "loading";
 let currentErrorMessage = "Search failed.";
 let currentProviderPage: ProviderPageContext | null = null;
@@ -414,11 +474,42 @@ let currentVersionInfoMode: "version" | "releaseDate" = "version";
 let currentReleaseUpdateInfo: ReleaseUpdateInfo | null = null;
 let hasLoadedInfoPanelStats = false;
 let infoPanelStatsRefreshPromise: Promise<void> | null = null;
+let infoPanelStatsRevision = 0;
+let inactiveTitleMarkupPromise: Promise<string> | null = null;
+let settingsWriteQueue: Promise<void> = Promise.resolve();
+let profileNameSaveTimer: number | null = null;
 const RETRY_COOLDOWN_SECONDS = 2;
+const PROFILE_NAME_SAVE_DELAY_MS = 250;
 
 document.addEventListener("DOMContentLoaded", () => {
-  void initializePopup();
+  void initializePopup().catch((error: unknown) => {
+    const message = getPopupErrorMessage(error, "Unable to initialize the extension popup.");
+    try {
+      renderErrorState(message);
+    } catch {
+      // The popup document may have been closed while initialization was pending.
+    }
+  });
 });
+
+function getPopupErrorMessage(error: unknown, fallbackMessage: string): string {
+  return error instanceof Error && error.message.trim() ? error.message : fallbackMessage;
+}
+
+function runPopupTask(
+  task: () => Promise<void> | void,
+  fallbackMessage = "Unable to complete that action.",
+): void {
+  void Promise.resolve()
+    .then(task)
+    .catch((error: unknown) => {
+      try {
+        setStatus(getPopupErrorMessage(error, fallbackMessage), "error");
+      } catch {
+        // The popup may have closed before the browser API operation settled.
+      }
+    });
+}
 
 // noinspection JSDeprecatedSymbols
 chrome.storage.onChanged.addListener((changes: Record<string, { newValue?: unknown }>, areaName: string) => {
@@ -436,12 +527,11 @@ chrome.storage.onChanged.addListener((changes: Record<string, { newValue?: unkno
 async function initializePopup(): Promise<void> {
   setResetEnabled(false);
   setStatus("Checking the current tab...", "idle");
-  const [inactiveTitleMarkup, settings, activeTab] = await Promise.all([
-    getAlternatingInactiveTitleMarkup(),
+  const [settings, activeTab] = await Promise.all([
     loadSettings(),
     getActiveTab(),
+    migrateLookupCacheStorage(chrome.storage.local),
   ]);
-  currentInactiveTitleMarkup = inactiveTitleMarkup;
   currentSettings = settings;
   wireOptionsControls();
   renderOptionsPanel();
@@ -450,66 +540,90 @@ async function initializePopup(): Promise<void> {
   currentSourceUrl = activeTab?.url ?? "";
   void syncActionIcon();
 
-  const providerPageContext = await getProviderPageContext(currentSourceUrl);
-  if (providerPageContext) {
+  const route = resolvePopupRoute(currentSourceUrl, currentSettings.enabledProviders);
+  if (route.kind === "provider-page") {
+    const providerPageContext = await getProviderPageContext(currentSourceUrl);
+    if (!providerPageContext) {
+      currentCache = null;
+      currentCachedResultFlags = {};
+      await renderUnsupportedState();
+      return;
+    }
     currentCache = null;
     currentCachedResultFlags = {};
     currentProviderPage = providerPageContext;
-    renderProviderPageState(providerPageContext);
+    await renderProviderPageState(providerPageContext);
     return;
   }
 
   currentProviderPage = null;
-  if (!isMangabakaSeriesUrl(currentSourceUrl)) {
+  if (route.kind === "unsupported") {
     currentCache = null;
     currentCachedResultFlags = {};
     await renderUnsupportedState();
     return;
   }
 
-  const seriesId = getSeriesIdFromUrl(currentSourceUrl);
-  if (!seriesId) {
-    currentCache = null;
-    currentCachedResultFlags = {};
-    await renderUnsupportedState();
-    return;
+  const seriesId = route.seriesId.toString();
+  if (currentTabId != null) {
+    try {
+      currentPageContextClient = await PageContextClient.connect(currentTabId);
+      const context = currentPageContextClient.getLastContext();
+      currentPageContext = context?.seriesId === route.seriesId ? context : null;
+    } catch {
+      currentPageContextClient = null;
+      currentPageContext = null;
+    }
   }
 
   setResetEnabled(true);
   wireTopResetButton(seriesId);
-
-  const previewTitle = extractMangaBakaPreviewTitle(activeTab?.title);
-  if (previewTitle) {
-    renderMangaBakaHeader(previewTitle, []);
-  }
-
-  const sourceUrlSnapshot = currentSourceUrl;
-  const liveMangaBakaMetadataPromise = extractMetadataFromActiveTab()
-    .then((payload) => payload ? createMangaBakaMetadata(seriesId, sourceUrlSnapshot, payload) : null)
-    .catch(() => null);
-  void liveMangaBakaMetadataPromise.then((metadata) => {
-    if (!metadata || currentCache || currentSourceUrl !== sourceUrlSnapshot || currentProviderPage) {
-      return;
-    }
-
-    renderMangaBakaHeader(metadata.primaryTitle, metadata.authors);
-  });
 
   const cachedLookup = await loadCache(seriesId);
   if (cachedLookup) {
     currentCache = cachedLookup;
     currentCachedResultFlags = buildCachedResultFlags(cachedLookup.results, true);
     renderLookup(cachedLookup, true);
+
+    try {
+      const refreshedMetadata = await fetchMangaBakaMetadata(currentSourceUrl, seriesId);
+      if (shouldInvalidateProviderResults(cachedLookup.series, refreshedMetadata.apiSeries.titles)) {
+        await persistMetadataOnlyInvalidation(refreshedMetadata);
+        await runLookup(
+          refreshedMetadata.sourceUrl,
+          seriesId,
+          createEmptyRejectedProviderUrls(),
+          { ...EMPTY_TITLE_ATTEMPT_INDEXES },
+          refreshedMetadata,
+        );
+        return;
+      }
+
+      const refreshedCache: CachedLookup = {
+        ...cachedLookup,
+        series: createCachedSeries(refreshedMetadata),
+      };
+      await saveCache(refreshedCache);
+      currentCache = refreshedCache;
+      renderLookup(refreshedCache, true);
+    } catch (error) {
+      if (error instanceof InvalidMangaBakaPageError) {
+        await clearCache(seriesId);
+        currentCache = null;
+        await renderInvalidPageState();
+        return;
+      }
+      setStatus("Loaded cached API metadata; MangaBaka refresh failed. Retry is available.", "error");
+      wireCachedMetadataRetryButton(seriesId);
+    }
     return;
   }
 
-  const liveMangaBakaMetadata = await liveMangaBakaMetadataPromise;
   await runLookup(
     currentSourceUrl,
     seriesId,
     createEmptyRejectedProviderUrls(),
     { ...EMPTY_TITLE_ATTEMPT_INDEXES },
-    liveMangaBakaMetadata ?? undefined,
   );
 }
 
@@ -550,7 +664,8 @@ async function syncActionIcon(): Promise<void> {
 
   try {
     await chrome.runtime.sendMessage({
-      type: "sync-action-icon",
+      protocolVersion: 1,
+      type: "action:sync",
       tabId: currentTabId,
       url: currentSourceUrl,
     });
@@ -567,7 +682,8 @@ function requestReleaseUpdateStatus(): void {
   void (async () => {
     try {
       await chrome.runtime.sendMessage({
-        type: "ensure-release-update-status",
+        protocolVersion: 1,
+        type: "release:ensure",
       });
     } catch {
       return;
@@ -613,11 +729,11 @@ function setInfoPanelLinkState(node: HTMLAnchorElement, label: string, url: stri
   node.tabIndex = -1;
 }
 
-function createMangaBakaMetadata(
+function createLegacyMangaBakaMetadata(
   seriesId: string,
   sourceUrl: string,
   extractedMetadata: ExtractedMetadataPayload,
-): MangaBakaMetadata {
+): Omit<MangaBakaMetadata, "apiSeries"> {
   return {
     seriesId,
     sourceUrl,
@@ -652,10 +768,37 @@ function refreshInfoPanelStatsIfNeeded(force = false): Promise<void> {
     return Promise.resolve();
   }
 
-  infoPanelStatsRefreshPromise ??= refreshInfoPanelStats().finally(() => {
-    infoPanelStatsRefreshPromise = null;
-  });
+  infoPanelStatsRefreshPromise ??= refreshInfoPanelStats().then(
+    () => {
+      infoPanelStatsRefreshPromise = null;
+      if (
+        !hasLoadedInfoPanelStats
+        && isOptionsPanelOpen()
+        && currentSettings.optionsPanelTab === "info"
+      ) {
+        runPopupTask(
+          () => refreshInfoPanelStatsIfNeeded(),
+          "Unable to refresh extension information.",
+        );
+      }
+    },
+    (error: unknown) => {
+      infoPanelStatsRefreshPromise = null;
+      throw error;
+    },
+  );
   return infoPanelStatsRefreshPromise;
+}
+
+function invalidateInfoPanelStats(): void {
+  infoPanelStatsRevision += 1;
+  hasLoadedInfoPanelStats = false;
+  if (isOptionsPanelOpen() && currentSettings.optionsPanelTab === "info") {
+    runPopupTask(
+      () => refreshInfoPanelStatsIfNeeded(),
+      "Unable to refresh extension information.",
+    );
+  }
 }
 
 function isMangabakaSeriesUrl(url: string): boolean {
@@ -678,7 +821,7 @@ function getSeriesIdFromUrl(url: string): string | null {
 }
 
 function getCacheKey(seriesId: string): string {
-  return `lookup:${seriesId}`;
+  return getLookupCacheKey(seriesId);
 }
 
 async function loadSettings(): Promise<ExtensionSettings> {
@@ -687,7 +830,14 @@ async function loadSettings(): Promise<ExtensionSettings> {
   const storedEnabledProviders = settings?.enabledProviders;
   const providerLabelMode = settings?.providerLabelMode;
   const mangaBakaLinkType = normalizeLinkTargetType(settings?.mangaBakaLinkType, DEFAULT_MANGABAKA_LINK_TARGET_TYPE);
-  const providerLinkType = normalizeLinkTargetType(settings?.providerLinkType, DEFAULT_PROVIDER_LINK_TARGET_TYPE);
+  const hasStoredSearchLinkType = settings?.searchLinkType === "current" || settings?.searchLinkType === "new";
+  const searchLinkType = normalizeLinkTargetType(
+    settings?.searchLinkType,
+    normalizeLinkTargetType(settings?.providerLinkType, DEFAULT_SEARCH_LINK_TARGET_TYPE),
+  );
+  const providerLinkType = hasStoredSearchLinkType
+    ? normalizeLinkTargetType(settings?.providerLinkType, DEFAULT_PROVIDER_LINK_TARGET_TYPE)
+    : DEFAULT_PROVIDER_LINK_TARGET_TYPE;
   const optionsPanelTab = normalizeOptionsPanelTab(settings?.optionsPanelTab);
   const mangaBakaButtonTarget = normalizeMangaBakaButtonTarget(settings?.mangaBakaButtonTarget);
 
@@ -701,6 +851,7 @@ async function loadSettings(): Promise<ExtensionSettings> {
       ? providerLabelMode
       : DEFAULT_PROVIDER_LABEL_MODE,
     mangaBakaLinkType,
+    searchLinkType,
     providerLinkType,
     optionsPanelTab,
     mangaBakaButtonTarget,
@@ -709,12 +860,34 @@ async function loadSettings(): Promise<ExtensionSettings> {
 }
 
 async function saveSettings(settings: ExtensionSettings): Promise<void> {
-  await chrome.storage.local.set({ [SETTINGS_KEY]: settings });
+  const snapshot: ExtensionSettings = {
+    ...settings,
+    enabledProviders: { ...settings.enabledProviders },
+  };
+  const write = settingsWriteQueue
+    .catch(() => undefined)
+    .then(() => chrome.storage.local.set({ [SETTINGS_KEY]: snapshot }));
+  settingsWriteQueue = write;
+  await write;
+}
+
+function queueProfileNameSave(): void {
+  if (profileNameSaveTimer != null) {
+    window.clearTimeout(profileNameSaveTimer);
+  }
+
+  profileNameSaveTimer = window.setTimeout(() => {
+    profileNameSaveTimer = null;
+    runPopupTask(
+      () => saveSettings(currentSettings),
+      "Unable to save the MangaBaka profile name.",
+    );
+  }, PROFILE_NAME_SAVE_DELAY_MS);
 }
 
 function wireOptionsControls(): void {
   getMangaBakaButton().onclick = () => {
-    void navigateToConfiguredMangaBakaPage();
+    runPopupTask(() => navigateToConfiguredMangaBakaPage(), "Unable to open MangaBaka.");
   };
 
   getOptionsButton().onclick = () => {
@@ -722,13 +895,13 @@ function wireOptionsControls(): void {
   };
 
   getProvidersTabButton().onclick = () => {
-    void updateOptionsPanelTab("providers");
+    runPopupTask(() => updateOptionsPanelTab("providers"), "Unable to save the selected options tab.");
   };
   getExtensionTabButton().onclick = () => {
-    void updateOptionsPanelTab("extension");
+    runPopupTask(() => updateOptionsPanelTab("extension"), "Unable to save the selected options tab.");
   };
   getInfoTabButton().onclick = () => {
-    void updateOptionsPanelTab("info");
+    runPopupTask(() => updateOptionsPanelTab("info"), "Unable to load extension information.");
   };
   getInfoVersionNode().onclick = () => {
     currentVersionInfoMode = currentVersionInfoMode === "version" ? "releaseDate" : "version";
@@ -757,13 +930,13 @@ function wireOptionsControls(): void {
 
   const wireProviderOption = (providerKey: ProviderKey, input: HTMLInputElement): void => {
     input.onchange = () => {
-      void updateSettings({
+      runPopupTask(() => updateSettings({
         ...currentSettings,
         enabledProviders: {
           ...currentSettings.enabledProviders,
           [providerKey]: input.checked,
         },
-      });
+      }), `Unable to update ${getProviderDisplayLabel(providerKey)} settings.`);
     };
   };
 
@@ -771,36 +944,45 @@ function wireOptionsControls(): void {
   wireProviderOption("mangadex", getMangaDexOptionInput());
   wireProviderOption("mangafire", getMangaFireOptionInput());
   wireProviderOption("weebcentral", getWeebCentralOptionInput());
-  wireProviderOption("ehentai", getEHentaiOptionInput());
-  wireProviderOption("exhentai", getExHentaiOptionInput());
+  if (__ADULT_PROVIDERS_ENABLED__) {
+    wireProviderOption("ehentai", getEHentaiOptionInput());
+    wireProviderOption("exhentai", getExHentaiOptionInput());
+  }
 
   getProviderLabelModeSelect().onchange = () => {
     const value = getProviderLabelModeSelect().value;
-    void updateSettings({
+    runPopupTask(() => updateSettings({
       ...currentSettings,
       providerLabelMode: value === "icons" || value === "stacked" ? value : DEFAULT_PROVIDER_LABEL_MODE,
-    });
+    }), "Unable to update the provider label setting.");
   };
 
   getMangaBakaLinkTypeSelect().onchange = () => {
-    void updateSettings({
+    runPopupTask(() => updateSettings({
       ...currentSettings,
       mangaBakaLinkType: normalizeLinkTargetType(getMangaBakaLinkTypeSelect().value),
-    });
+    }), "Unable to update the MangaBaka link setting.");
+  };
+
+  getSearchLinkTypeSelect().onchange = () => {
+    runPopupTask(() => updateSettings({
+      ...currentSettings,
+      searchLinkType: normalizeLinkTargetType(getSearchLinkTypeSelect().value),
+    }), "Unable to update the search link setting.");
   };
 
   getProviderLinkTypeSelect().onchange = () => {
-    void updateSettings({
+    runPopupTask(() => updateSettings({
       ...currentSettings,
       providerLinkType: normalizeLinkTargetType(getProviderLinkTypeSelect().value),
-    });
+    }), "Unable to update the provider link setting.");
   };
 
   getMangaBakaButtonTargetSelect().onchange = () => {
-    void updateSettings({
+    runPopupTask(() => updateSettings({
       ...currentSettings,
       mangaBakaButtonTarget: normalizeMangaBakaButtonTarget(getMangaBakaButtonTargetSelect().value),
-    });
+    }), "Unable to update the MangaBaka button setting.");
   };
 
   getMangaBakaProfileNameInput().oninput = () => {
@@ -809,7 +991,17 @@ function wireOptionsControls(): void {
       mangaBakaProfileName: getMangaBakaProfileNameInput().value,
     };
     renderMangaBakaNavigationControls();
-    void saveSettings(currentSettings);
+    queueProfileNameSave();
+  };
+  getMangaBakaProfileNameInput().onchange = () => {
+    if (profileNameSaveTimer != null) {
+      window.clearTimeout(profileNameSaveTimer);
+      profileNameSaveTimer = null;
+    }
+    runPopupTask(
+      () => saveSettings(currentSettings),
+      "Unable to save the MangaBaka profile name.",
+    );
   };
 }
 
@@ -819,10 +1011,13 @@ function renderOptionsPanel(): void {
   getComixToOptionInput().checked = false;
   getMangaFireOptionInput().checked = currentSettings.enabledProviders.mangafire;
   getWeebCentralOptionInput().checked = currentSettings.enabledProviders.weebcentral;
-  getEHentaiOptionInput().checked = currentSettings.enabledProviders.ehentai;
-  getExHentaiOptionInput().checked = currentSettings.enabledProviders.exhentai;
+  if (__ADULT_PROVIDERS_ENABLED__) {
+    getEHentaiOptionInput().checked = currentSettings.enabledProviders.ehentai;
+    getExHentaiOptionInput().checked = currentSettings.enabledProviders.exhentai;
+  }
   getProviderLabelModeSelect().value = currentSettings.providerLabelMode;
   getMangaBakaLinkTypeSelect().value = currentSettings.mangaBakaLinkType;
+  getSearchLinkTypeSelect().value = currentSettings.searchLinkType;
   getProviderLinkTypeSelect().value = currentSettings.providerLinkType;
   getMangaBakaButtonTargetSelect().value = currentSettings.mangaBakaButtonTarget;
   getMangaBakaProfileNameInput().value = currentSettings.mangaBakaProfileName;
@@ -864,7 +1059,7 @@ async function updateOptionsPanelTab(optionsPanelTab: OptionsPanelTab): Promise<
   if (currentSettings.optionsPanelTab === optionsPanelTab) {
     renderOptionsPanelTabs();
     if (optionsPanelTab === "info" && isOptionsPanelOpen()) {
-      void refreshInfoPanelStatsIfNeeded();
+      await refreshInfoPanelStatsIfNeeded();
     }
     return;
   }
@@ -875,7 +1070,7 @@ async function updateOptionsPanelTab(optionsPanelTab: OptionsPanelTab): Promise<
   };
   renderOptionsPanelTabs();
   if (optionsPanelTab === "info" && isOptionsPanelOpen()) {
-    void refreshInfoPanelStatsIfNeeded();
+    await refreshInfoPanelStatsIfNeeded();
   }
   await saveSettings(currentSettings);
 }
@@ -1111,13 +1306,20 @@ function estimateStorageEntryBytes(key: string, value: unknown): number {
   return encoder.encode(key).length + encoder.encode(serializedValue).length;
 }
 
-function isCachedLookup(value: unknown): value is CachedLookup {
+function isProviderMatch(value: unknown): value is ProviderMatch {
   if (!value || typeof value !== "object") {
     return false;
   }
-
-  const cache = value as Partial<CachedLookup>;
-  return cache.version === CACHE_VERSION && typeof cache.seriesId === "string" && typeof cache.results === "object";
+  const match = value as Partial<ProviderMatch>;
+  return (
+    typeof match.provider === "string"
+    && typeof match.title === "string"
+    && match.title.trim().length > 0
+    && typeof match.url === "string"
+    && /^https?:\/\//i.test(match.url)
+    && (match.latestChapterNumber === null || typeof match.latestChapterNumber === "string")
+    && (match.latestChapterLanguage === null || match.latestChapterLanguage === "en")
+  );
 }
 
 function getMangaDexChapterState(result: ProviderMatch | null): MangaDexChapterState | null {
@@ -1163,6 +1365,7 @@ function canToggleMangaDexChapterState(result: ProviderMatch | null): boolean {
 }
 
 async function refreshInfoPanelStats(): Promise<void> {
+  const requestedRevision = infoPanelStatsRevision;
   requestReleaseUpdateStatus();
   const storedEntries = await chrome.storage.local.get(null);
   currentReleaseUpdateInfo = isReleaseUpdateInfo(storedEntries[POPUP_RELEASE_UPDATE_STORAGE_KEY])
@@ -1174,14 +1377,14 @@ async function refreshInfoPanelStats(): Promise<void> {
   let totalBytes = 0;
 
   for (const [key, value] of Object.entries(storedEntries)) {
-    if (!key.startsWith("lookup:") || !isCachedLookup(value)) {
+    if (!key.startsWith(LOOKUP_CACHE_PREFIX) || !isLookupCacheV12(value)) {
       continue;
     }
 
     seriesCount += 1;
     totalBytes += estimateStorageEntryBytes(key, value);
 
-    const mangaDexResult = value.results.mangadex;
+    const mangaDexResult = hydrateProviderState(value.providers).results.mangadex;
     if (!mangaDexResult) {
       continue;
     }
@@ -1194,12 +1397,17 @@ async function refreshInfoPanelStats(): Promise<void> {
 
   currentCacheSeriesStats = { seriesCount, totalBytes };
   currentMangaDexPurgeStats = { purgedCount, totalCount };
-  hasLoadedInfoPanelStats = true;
+  hasLoadedInfoPanelStats = requestedRevision === infoPanelStatsRevision;
   renderInfoPanel();
 }
 
 async function handleExtensionReset(): Promise<void> {
   setStatus("Resetting extension...", "loading");
+  if (profileNameSaveTimer != null) {
+    window.clearTimeout(profileNameSaveTimer);
+    profileNameSaveTimer = null;
+  }
+  await settingsWriteQueue.catch(() => undefined);
   await chrome.storage.local.clear();
   currentCache = null;
   currentCachedResultFlags = {};
@@ -1210,6 +1418,7 @@ async function handleExtensionReset(): Promise<void> {
   retryCountdowns = {};
   retryInProgress = {};
   armedReadLinkSaves = {};
+  readLinkSaveInProgress = null;
   currentCacheSeriesStats = { seriesCount: 0, totalBytes: 0 };
   currentMangaDexPurgeStats = { purgedCount: 0, totalCount: 0 };
   currentCacheSeriesStatFormat = "count";
@@ -1234,7 +1443,10 @@ function setOptionsPanelOpen(isOpen: boolean): void {
   if (isOpen) {
     clearPendingConfirmation();
     if (currentSettings.optionsPanelTab === "info") {
-      void refreshInfoPanelStatsIfNeeded();
+      runPopupTask(
+        () => refreshInfoPanelStatsIfNeeded(),
+        "Unable to load extension information.",
+      );
     }
   }
   getOptionsButton().setAttribute("aria-expanded", isOpen ? "true" : "false");
@@ -1326,86 +1538,14 @@ async function openUrlWithPreference(url: string, linkType: LinkTargetType): Pro
 }
 
 function matchProviderPage(url: string): { providerKey: ProviderKey; pageType: "series" | "chapter" | null } | null {
-  try {
-    const parsedUrl = new URL(url);
-    const path = parsedUrl.pathname.replace(/\/+$/, "");
-
-    if (parsedUrl.hostname === "mangadex.org") {
-      if (/^\/title\/[^/]+(?:\/[^/]+)?$/i.test(path)) {
-        return { providerKey: "mangadex", pageType: "series" };
-      }
-
-      if (/^\/chapter\/[^/]+$/i.test(path)) {
-        return { providerKey: "mangadex", pageType: "chapter" };
-      }
-
-       return { providerKey: "mangadex", pageType: null };
-    }
-
-    if (parsedUrl.hostname === "atsu.moe") {
-      if (/^\/manga\/[^/]+$/i.test(path)) {
-        return { providerKey: "atsu", pageType: "series" };
-      }
-
-      if (/^\/read\/[^/]+\/[^/]+$/i.test(path)) {
-        return { providerKey: "atsu", pageType: "chapter" };
-      }
-
-      return { providerKey: "atsu", pageType: null };
-    }
-
-    if (parsedUrl.hostname === "mangafire.to") {
-      if (/^\/manga\/[^/]+$/i.test(path)) {
-        return { providerKey: "mangafire", pageType: "series" };
-      }
-
-      if (/^\/read\/[^/]+(?:\/[^/]+){2,}$/i.test(path)) {
-        return { providerKey: "mangafire", pageType: "chapter" };
-      }
-
-      return { providerKey: "mangafire", pageType: null };
-    }
-
-    if (parsedUrl.hostname === "weebcentral.com") {
-      if (/^\/series\/[^/]+\/[^/]+$/i.test(path)) {
-        return { providerKey: "weebcentral", pageType: "series" };
-      }
-
-      if (/^\/chapters\/[^/]+$/i.test(path)) {
-        return { providerKey: "weebcentral", pageType: "chapter" };
-      }
-
-      return { providerKey: "weebcentral", pageType: null };
-    }
-
-    if (parsedUrl.hostname === "e-hentai.org") {
-      if (/^\/g\/[^/]+\/[^/]+$/i.test(path)) {
-        return { providerKey: "ehentai", pageType: "series" };
-      }
-
-      if (/^\/s\/[^/]+\/[^/]+$/i.test(path)) {
-        return { providerKey: "ehentai", pageType: "chapter" };
-      }
-
-      return { providerKey: "ehentai", pageType: null };
-    }
-
-    if (parsedUrl.hostname === "exhentai.org") {
-      if (/^\/g\/[^/]+\/[^/]+$/i.test(path)) {
-        return { providerKey: "exhentai", pageType: "series" };
-      }
-
-      if (/^\/s\/[^/]+\/[^/]+$/i.test(path)) {
-        return { providerKey: "exhentai", pageType: "chapter" };
-      }
-
-      return { providerKey: "exhentai", pageType: null };
-    }
-  } catch {
+  const outcome = matchRegisteredProviderPage(url);
+  if (!outcome || outcome.kind !== "found") {
     return null;
   }
-
-  return null;
+  return {
+    providerKey: outcome.value.providerId as ProviderKey,
+    pageType: outcome.value.pageType,
+  };
 }
 
 async function getProviderPageContext(url: string): Promise<ProviderPageContext | null> {
@@ -1416,6 +1556,9 @@ async function getProviderPageContext(url: string): Promise<ProviderPageContext 
 
   if (match.pageType == null) {
     return {
+      version: 1,
+      kind: "provider-page",
+      url,
       providerKey: match.providerKey,
       providerLabel: PROVIDER_LABELS[match.providerKey],
       pageType: null,
@@ -1430,6 +1573,9 @@ async function getProviderPageContext(url: string): Promise<ProviderPageContext 
   const titles = metadata?.titles ?? [];
 
   return {
+    version: 1,
+    kind: "provider-page",
+    url,
     providerKey: match.providerKey,
     providerLabel: PROVIDER_LABELS[match.providerKey],
     pageType: match.pageType,
@@ -1445,6 +1591,10 @@ async function extractProviderPageMetadata(
   sourceUrl: string,
   pageType: "series" | "chapter",
 ): Promise<ExtractedMetadataPayload | null> {
+  if (providerKey === "mangadex" && pageType === "chapter") {
+    return fetchMangaDexProviderPageMetadata(sourceUrl, pageType);
+  }
+
   const liveMetadata = await extractProviderPageMetadataFromActiveTab(providerKey, sourceUrl);
   if (liveMetadata?.titles.length) {
     return liveMetadata;
@@ -1463,6 +1613,9 @@ async function fetchProviderPageMetadata(
   sourceUrl: string,
   pageType: "series" | "chapter",
 ): Promise<ExtractedMetadataPayload | null> {
+  if (__ADULT_PROVIDERS_ENABLED__ && (providerKey === "ehentai" || providerKey === "exhentai")) {
+    return null;
+  }
   switch (providerKey) {
     case "atsu":
       return fetchAtsumaruProviderPageMetadata(sourceUrl, pageType);
@@ -1472,8 +1625,6 @@ async function fetchProviderPageMetadata(
       return fetchMangaFireProviderPageMetadata(sourceUrl);
     case "weebcentral":
       return fetchWeebCentralProviderPageMetadata(sourceUrl, pageType);
-    case "ehentai":
-    case "exhentai":
     case "comixto":
     default:
       return null;
@@ -1483,19 +1634,26 @@ async function fetchProviderPageMetadata(
 async function fetchProviderDocumentWithStatus(
   sourceUrl: string,
 ): Promise<{ status: number | null; document: Document | null }> {
-  try {
-    const response = await fetch(sourceUrl, { credentials: "include" });
-    if (!response.ok) {
-      return { status: response.status, document: null };
-    }
-
-    return {
-      status: response.status,
-      document: new DOMParser().parseFromString(await response.text(), "text/html"),
-    };
-  } catch {
+  const pageOutcome = matchRegisteredProviderPage(sourceUrl);
+  if (!pageOutcome || pageOutcome.kind !== "found") {
     return { status: null, document: null };
   }
+  const adapter = getProviderAdapter(pageOutcome.providerId);
+  if (!adapter) {
+    return { status: null, document: null };
+  }
+  const responseOutcome = await fetchProviderText({
+    providerId: adapter.id,
+    url: sourceUrl,
+    credentialPolicy: adapter.credentialPolicy,
+  });
+  if (responseOutcome.kind !== "found") {
+    return { status: responseOutcome.httpStatus ?? null, document: null };
+  }
+  return {
+    status: responseOutcome.value.status,
+    document: new DOMParser().parseFromString(responseOutcome.value.body, "text/html"),
+  };
 }
 
 async function fetchProviderDocument(sourceUrl: string): Promise<Document | null> {
@@ -1674,15 +1832,16 @@ function cleanProviderPageTitle(providerKey: ProviderKey, value: string): string
     return "";
   }
 
+  if (__ADULT_PROVIDERS_ENABLED__ && (providerKey === "ehentai" || providerKey === "exhentai")) {
+    return extractEHentaiBaseTitle(trimmed);
+  }
+
   switch (providerKey) {
     case "atsu":
     case "mangadex":
     case "mangafire":
     case "weebcentral":
       return stripTrailingChapterInfoFromTitle(trimmed);
-    case "ehentai":
-    case "exhentai":
-      return extractEHentaiBaseTitle(trimmed);
     case "comixto":
     default:
       return cleanProviderPageSiteSuffix(trimmed);
@@ -1753,47 +1912,53 @@ async function fetchMangaDexProviderPageMetadata(
     const segments = parsedUrl.pathname.split("/").filter(Boolean);
 
     if (pageType === "series" && segments[0] === "title" && segments[1]) {
-      const response = await fetch(`https://api.mangadex.org/manga/${encodeURIComponent(segments[1])}`, {
+      const response = await fetchProviderText({
+        providerId: "mangadex",
+        url: `https://api.mangadex.org/manga/${encodeURIComponent(segments[1])}`,
+        credentialPolicy: "omit",
         headers: { accept: "application/json" },
       });
-      if (!response.ok) {
+      if (response.kind !== "found") {
         return null;
       }
 
-      const payload = (await response.json()) as {
-        data?: {
-          id: string;
-          attributes?: {
-            title?: Record<string, string>;
-            altTitles?: Array<Record<string, string>>;
-          };
-        };
-      };
-      const titles = cleanProviderPageTitles("mangadex", getMangaDexTitles(payload.data ?? {}));
+      const parsed = parseMangaDexSeriesTitlesResponse(response.value.body);
+      if (parsed.kind !== "found") {
+        return null;
+      }
+      const titles = cleanProviderPageTitles("mangadex", parsed.value.titles);
       return titles.length > 0 ? { titles, authors: [] } : null;
     }
 
     if (pageType === "chapter" && segments[0] === "chapter" && segments[1]) {
-      const response = await fetch(`https://api.mangadex.org/chapter/${encodeURIComponent(segments[1])}?includes[]=manga`, {
-        headers: { accept: "application/json" },
+      const response = await fetchProviderText({
+        providerId: "mangadex",
+        ...buildMangaDexChapterMetadataRequest(segments[1]),
       });
-      if (!response.ok) {
+      if (response.kind !== "found") {
         return null;
       }
 
-      const payload = (await response.json()) as {
-        data?: {
-          relationships?: Array<{
-            type?: string;
-            attributes?: {
-              title?: Record<string, string>;
-              altTitles?: Array<Record<string, string>>;
-            };
-          }>;
-        };
-      };
-      const mangaRelationship = payload.data?.relationships?.find((relationship) => relationship.type === "manga");
-      const titles = cleanProviderPageTitles("mangadex", getMangaDexTitles(mangaRelationship ?? {}));
+      const chapterMetadata = parseMangaDexChapterSeriesResponse(response.value.body);
+      if (chapterMetadata.kind !== "found") {
+        return null;
+      }
+
+      let titles = cleanProviderPageTitles("mangadex", chapterMetadata.value.titles);
+      if (titles.length === 0) {
+        const seriesResponse = await fetchProviderText({
+          providerId: "mangadex",
+          ...buildMangaDexTitleMetadataRequest(chapterMetadata.value.seriesId),
+        });
+        if (seriesResponse.kind !== "found") {
+          return null;
+        }
+        const seriesMetadata = parseMangaDexSeriesTitlesResponse(seriesResponse.value.body);
+        if (seriesMetadata.kind !== "found") {
+          return null;
+        }
+        titles = cleanProviderPageTitles("mangadex", seriesMetadata.value.titles);
+      }
       return titles.length > 0 ? { titles, authors: [] } : null;
     }
   } catch {
@@ -1863,7 +2028,7 @@ function extractWeebCentralProviderPageMetadataFromDocument(
         documentNode.title,
         getTextContent(documentNode, "h1"),
         getTextContent(documentNode, "main h1"),
-        ...getSeriesTitlesFromAnchors(documentNode, /^\/series\/[^/]+\/[^/]+$/i),
+        ...getSeriesTitlesFromAnchors(documentNode, /^\/series\/[^/]+(?:\/[^/]+)?$/i),
       ]
     : [];
 
@@ -1990,6 +2155,10 @@ async function extractProviderPageMetadataFromActiveTab(
             return "";
           }
 
+          if (__ADULT_PROVIDERS_ENABLED__ && (activeProviderKey === "ehentai" || activeProviderKey === "exhentai")) {
+            return extractEHentaiBaseTitle(trimmed);
+          }
+
           switch (activeProviderKey) {
             case "atsu":
               return stripTrailingChapterInfo(trimmed);
@@ -1997,9 +2166,6 @@ async function extractProviderPageMetadataFromActiveTab(
             case "mangafire":
             case "weebcentral":
               return stripTrailingChapterInfo(trimmed);
-            case "ehentai":
-            case "exhentai":
-              return extractEHentaiBaseTitle(trimmed);
             default:
               return cleanSiteSuffix(trimmed);
           }
@@ -2199,7 +2365,9 @@ async function extractProviderPageMetadataFromActiveTab(
         addMetaTitle("meta[property='og:title']", genericCandidates);
         addMetaTitle("meta[name='twitter:title']", genericCandidates);
 
-        switch (activeProviderKey) {
+        if (__ADULT_PROVIDERS_ENABLED__ && (activeProviderKey === "ehentai" || activeProviderKey === "exhentai")) {
+          addSelectorText(["#gn", "#gj", "h1"], prioritizedCandidates);
+        } else switch (activeProviderKey) {
           case "mangadex": {
             if (sourceSegments[0] === "title" && sourceSegments[2]) {
               prioritizedCandidates.push(hyphenatedTitleToText(sourceSegments[2]));
@@ -2227,13 +2395,8 @@ async function extractProviderPageMetadataFromActiveTab(
             if (sourceSegments[0] === "series" && sourceSegments[2]) {
               prioritizedCandidates.push(hyphenatedTitleToText(sourceSegments[2]));
             }
-            addAnchorMatches(/^\/series\/[^/]+\/[^/]+$/i, prioritizedCandidates);
+            addAnchorMatches(/^\/series\/[^/]+(?:\/[^/]+)?$/i, prioritizedCandidates);
             addSelectorText(["main h1", "main h2", "header h1", "header h2", "[class*='title']", "[class*='series']"], prioritizedCandidates);
-            break;
-          }
-          case "ehentai":
-          case "exhentai": {
-            addSelectorText(["#gn", "#gj", "h1"], prioritizedCandidates);
             break;
           }
           default:
@@ -2328,42 +2491,228 @@ function cloneRejectedProviderUrls(rejectedUrls: RejectedProviderUrls): Rejected
   );
 }
 
-async function loadCache(seriesId: string): Promise<CachedLookup | null> {
-  const cacheKey = getCacheKey(seriesId);
-  const stored = await chrome.storage.local.get(cacheKey);
-  const cache = stored[cacheKey] as CachedLookup | undefined;
+function createUnsearchedProviders(): Record<ProviderKey, boolean> {
+  return PROVIDER_KEYS.reduce((result, providerKey) => {
+    result[providerKey] = false;
+    return result;
+  }, {} as Record<ProviderKey, boolean>);
+}
 
-  if (!cache || cache.version !== CACHE_VERSION) {
-    return null;
+function createCachedSeries(metadata: MangaBakaMetadata): CachedMangaBakaSeries {
+  return {
+    requestedSeriesId: metadata.apiSeries.requestedSeriesId,
+    id: metadata.apiSeries.id,
+    canonicalUrl: metadata.apiSeries.canonicalUrl,
+    mediaType: metadata.apiSeries.mediaType,
+    apiTitles: metadata.apiSeries.titles.map((title) => ({ ...title, traits: [...title.traits] })),
+    rankedSearchTitles: [...metadata.titles],
+    authors: [...metadata.apiSeries.authors],
+    apiLastUpdatedAt: metadata.apiSeries.apiLastUpdatedAt,
+    titleFingerprint: createTitleFingerprint(metadata.apiSeries.titles),
+  };
+}
+
+function createProviderCacheSnapshot(
+  results: LookupResults,
+  rejectedUrls: RejectedProviderUrls,
+  titleAttemptIndexes: Record<ProviderKey, number>,
+  searchedProviders: Record<ProviderKey, boolean>,
+  existingProviders: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return Object.fromEntries(PROVIDER_KEYS.map((providerKey) => {
+    const liveOutcome = currentProviderSearchOutcomes[providerKey];
+    if (liveOutcome && !isStableProviderSearchOutcome(liveOutcome)) {
+      const existingState = existingProviders[providerKey];
+      if (existingState && typeof existingState === "object") {
+        const existingOutcome = (existingState as { outcome?: unknown }).outcome;
+        const existingKind = existingOutcome && typeof existingOutcome === "object"
+          ? (existingOutcome as { kind?: unknown }).kind
+          : null;
+        if (existingKind === "found" || existingKind === "no_match") {
+          return [providerKey, existingState];
+        }
+      }
+    }
+    const stableOutcome = resolveStableProviderOutcome(
+      providerKey as ProviderId,
+      liveOutcome,
+      results[providerKey],
+    );
+    return [providerKey, {
+      searched: stableOutcome ? searchedProviders[providerKey] : false,
+      result: stableOutcome?.kind === "found" ? results[providerKey] : null,
+      outcome: stableOutcome,
+      rejectedUrls: [...rejectedUrls[providerKey]],
+      titleCursor: titleAttemptIndexes[providerKey],
+    }];
+  }));
+}
+
+function restoreStableProviderSearchOutcomes(providers: Record<string, unknown>): void {
+  const restored: Partial<Record<ProviderKey, ProviderSearchOutcome>> = {};
+  for (const providerKey of PROVIDER_KEYS) {
+    const state = providers[providerKey];
+    if (!state || typeof state !== "object") {
+      continue;
+    }
+    const providerState = state as { outcome?: unknown; result?: unknown };
+    const outcome = providerState.outcome;
+    if (!outcome || typeof outcome !== "object") {
+      continue;
+    }
+    const kind = (outcome as { kind?: unknown }).kind;
+    if (kind === "found" && isProviderMatch(providerState.result)) {
+      restored[providerKey] = {
+        kind: "found",
+        providerId: providerKey as ProviderId,
+        value: providerState.result,
+      };
+    } else if (kind === "no_match") {
+      restored[providerKey] = { kind: "no_match", providerId: providerKey as ProviderId };
+    }
+  }
+  currentProviderSearchOutcomes = restored;
+}
+
+function hydrateProviderState(providers: Record<string, unknown>): {
+  results: LookupResults;
+  rejectedUrls: RejectedProviderUrls;
+  searchedProviders: Record<ProviderKey, boolean>;
+  titleAttemptIndexes: Record<ProviderKey, number>;
+} {
+  const results = createEmptyLookupResults();
+  const rejectedUrls = createEmptyRejectedProviderUrls();
+  const searchedProviders = createUnsearchedProviders();
+  const titleAttemptIndexes = { ...EMPTY_TITLE_ATTEMPT_INDEXES };
+  for (const providerKey of PROVIDER_KEYS) {
+    const state = providers[providerKey];
+    if (!state || typeof state !== "object") {
+      continue;
+    }
+    const providerState = state as {
+      outcome?: { kind?: unknown } | null;
+      rejectedUrls?: unknown;
+      result?: unknown;
+      searched?: unknown;
+      titleCursor?: unknown;
+    };
+    const isFound = providerState.outcome?.kind === "found" && isProviderMatch(providerState.result);
+    const isNoMatch = providerState.outcome?.kind === "no_match" && providerState.result === null;
+    searchedProviders[providerKey] = providerState.searched === true && (isFound || isNoMatch);
+    results[providerKey] = isFound ? providerState.result as ProviderMatch : null;
+    rejectedUrls[providerKey] = Array.isArray(providerState.rejectedUrls)
+      ? providerState.rejectedUrls.filter((url): url is string => typeof url === "string")
+      : [];
+    titleAttemptIndexes[providerKey] = typeof providerState.titleCursor === "number"
+      && Number.isSafeInteger(providerState.titleCursor)
+      && providerState.titleCursor >= 0
+      ? providerState.titleCursor
+      : 0;
+  }
+  return { results, rejectedUrls, searchedProviders, titleAttemptIndexes };
+}
+
+function resolveCachedDisplayTitle(cache: CachedLookup): string {
+  const resolved = resolveSeriesTitles(cache.series.apiTitles, { mediaType: cache.series.mediaType });
+  if (!resolved) {
+    return cache.series.rankedSearchTitles[0] ?? "Unknown series";
   }
 
+  const activeContext = currentPageContextClient?.getLastContext() ?? currentPageContext;
+  const contextTitle = activeContext
+    && (activeContext.seriesId === cache.series.requestedSeriesId || activeContext.seriesId === cache.series.id)
+    ? activeContext.resolvedTitle
+    : null;
+  return resolveDisplayTitle(resolved, contextTitle);
+}
+
+function createMetadataFromCache(cache: CachedLookup): MangaBakaMetadata {
   return {
-    ...cache,
-    rejectedUrls: {
-      ...createEmptyRejectedProviderUrls(),
-      ...cache.rejectedUrls,
-    },
-    titleAttemptIndexes: {
-      ...EMPTY_TITLE_ATTEMPT_INDEXES,
-      ...cache.titleAttemptIndexes,
-    },
-    searchedProviders: {
-      ...DEFAULT_ENABLED_PROVIDERS,
-      ...cache.searchedProviders,
+    seriesId: cache.series.requestedSeriesId.toString(),
+    sourceUrl: cache.series.canonicalUrl,
+    primaryTitle: resolveCachedDisplayTitle(cache),
+    titles: [...cache.series.rankedSearchTitles],
+    authors: [...cache.series.authors],
+    apiSeries: {
+      requestedSeriesId: cache.series.requestedSeriesId,
+      id: cache.series.id,
+      state: "active",
+      mergedFrom: cache.series.id === cache.series.requestedSeriesId ? null : cache.series.requestedSeriesId,
+      canonicalUrl: cache.series.canonicalUrl,
+      mediaType: cache.series.mediaType,
+      titles: cache.series.apiTitles.map((title) => ({ ...title, traits: [...title.traits] })),
+      authors: [...cache.series.authors],
+      apiLastUpdatedAt: cache.series.apiLastUpdatedAt,
     },
   };
 }
 
+async function persistMetadataOnlyInvalidation(metadata: MangaBakaMetadata): Promise<CachedLookup> {
+  currentProviderSearchOutcomes = {};
+  const invalidatedCache: CachedLookup = {
+    schemaVersion: CACHE_VERSION,
+    series: createCachedSeries(metadata),
+    providers: {},
+    results: createEmptyLookupResults(),
+    rejectedUrls: createEmptyRejectedProviderUrls(),
+    titleAttemptIndexes: { ...EMPTY_TITLE_ATTEMPT_INDEXES },
+    searchedProviders: createUnsearchedProviders(),
+    searchedAt: new Date().toISOString(),
+  };
+  await saveCache(invalidatedCache);
+  currentCache = invalidatedCache;
+  currentCachedResultFlags = {};
+  return invalidatedCache;
+}
+
+async function loadCache(seriesId: string): Promise<CachedLookup | null> {
+  const cacheKey = getCacheKey(seriesId);
+  const stored = await chrome.storage.local.get(cacheKey);
+  const cache = stored[cacheKey];
+
+  if (!isLookupCacheV12(cache)) {
+    return null;
+  }
+  if (cache.series.requestedSeriesId.toString() !== seriesId) {
+    return null;
+  }
+
+  const providerState = hydrateProviderState(cache.providers);
+  const normalizedCache: CachedLookup = {
+    ...cache,
+    rejectedUrls: providerState.rejectedUrls,
+    titleAttemptIndexes: providerState.titleAttemptIndexes,
+    results: providerState.results,
+    searchedProviders: providerState.searchedProviders,
+  };
+  restoreStableProviderSearchOutcomes(normalizedCache.providers);
+  return normalizedCache;
+}
+
 async function saveCache(cache: CachedLookup): Promise<void> {
+  const providers = createProviderCacheSnapshot(
+    cache.results,
+    cache.rejectedUrls,
+    cache.titleAttemptIndexes,
+    cache.searchedProviders,
+    cache.providers,
+  );
+  const persistedCache: LookupCacheV12 = {
+    schemaVersion: CACHE_VERSION,
+    series: cache.series,
+    providers,
+    searchedAt: cache.searchedAt,
+  };
+  cache.providers = providers;
   await chrome.storage.local.set({
-    [getCacheKey(cache.seriesId)]: cache,
+    [getCacheKey(cache.series.requestedSeriesId.toString())]: persistedCache,
   });
-  await refreshInfoPanelStats();
+  invalidateInfoPanelStats();
 }
 
 async function clearCache(seriesId: string): Promise<void> {
   await chrome.storage.local.remove(getCacheKey(seriesId));
-  await refreshInfoPanelStats();
+  invalidateInfoPanelStats();
 }
 
 async function runLookup(
@@ -2381,18 +2730,22 @@ async function runLookup(
     const metadata = metadataOverride ?? (await fetchMangaBakaMetadata(sourceUrl, seriesId));
     setStatus("Searching enabled providers...", "loading");
     const results = await searchProviders(metadata, rejectedUrls, titleAttemptIndexes);
+    const searchedProviders = createInitialSearchedProviders(currentSettings.enabledProviders);
+    for (const providerKey of PROVIDER_KEYS) {
+      const outcome = currentProviderSearchOutcomes[providerKey];
+      if (outcome && !isStableProviderSearchOutcome(outcome)) {
+        searchedProviders[providerKey] = false;
+      }
+    }
 
     const cache: CachedLookup = {
-      version: CACHE_VERSION,
-      seriesId: metadata.seriesId,
-      sourceUrl: metadata.sourceUrl,
-      primaryTitle: metadata.primaryTitle,
-      titles: metadata.titles,
-      authors: metadata.authors,
+      schemaVersion: CACHE_VERSION,
+      series: createCachedSeries(metadata),
+      providers: createProviderCacheSnapshot(results, rejectedUrls, titleAttemptIndexes, searchedProviders),
       results,
       rejectedUrls: cloneRejectedProviderUrls(rejectedUrls),
       titleAttemptIndexes: { ...titleAttemptIndexes },
-      searchedProviders: createInitialSearchedProviders(currentSettings.enabledProviders),
+      searchedProviders,
       searchedAt: new Date().toISOString(),
     };
 
@@ -2409,209 +2762,49 @@ async function runLookup(
 
     const message = error instanceof Error ? error.message : "Search failed.";
     renderErrorState(message);
+    wireLookupRetryButton(seriesId);
   }
 }
 
-async function fetchMangaBakaMetadata(sourceUrl: string, seriesId: string): Promise<MangaBakaMetadata> {
-  const livePageMetadata = await extractMetadataFromActiveTab();
-  if (livePageMetadata) {
-    return {
-      seriesId,
-      sourceUrl,
-      primaryTitle: pickPreferredTitle(livePageMetadata.titles),
-      titles: livePageMetadata.titles,
-      authors: livePageMetadata.authors,
-    };
-  }
-
-  const response = await fetch(sourceUrl);
-  if (response.status === 404) {
-    throw new InvalidMangaBakaPageError();
-  }
-
-  if (!response.ok) {
-    throw new Error(`MangaBaka request failed (${response.status}).`);
-  }
-
-  const html = await response.text();
-  const extractedMetadata = extractMetadataFromHtml(html);
-  if (extractedMetadata) {
-    return {
-      seriesId,
-      sourceUrl,
-      primaryTitle: pickPreferredTitle(extractedMetadata.titles),
-      titles: extractedMetadata.titles,
-      authors: extractedMetadata.authors,
-    };
-  }
-
-  throw new InvalidMangaBakaPageError();
-}
-
-async function extractMetadataFromActiveTab(): Promise<ExtractedMetadataPayload | null> {
-  const tabId = await resolveUsableTabId();
-  if (tabId == null) {
-    return null;
-  }
-
+async function fetchMangaBakaMetadata(_sourceUrl: string, seriesId: string): Promise<MangaBakaMetadata> {
+  const numericSeriesId = Number(seriesId);
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 10_000);
   try {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: () => {
-        const normalizeTitle = (title: string): string =>
-          title
-            .normalize("NFKD")
-            .replace(/[\u0300-\u036f]/g, "")
-            .toLowerCase()
-            .replace(/[^\p{L}\p{N}\s]/gu, " ")
-            .replace(/\s+/g, " ")
-            .trim();
+    const apiSeries = await new MangaBakaApiClient().getSeries(numericSeriesId, controller.signal);
+    const resolved = resolveSeriesTitles(apiSeries.titles, { mediaType: apiSeries.mediaType });
+    if (!resolved) {
+      throw new Error("MangaBaka returned no usable titles. Retry the lookup.");
+    }
 
-        const dedupeTitles = (titles: string[]): string[] => {
-          const seen = new Set<string>();
-          const deduped: string[] = [];
-          for (const title of titles) {
-            const trimmedTitle = title.trim();
-            if (!trimmedTitle) {
-              continue;
-            }
-
-            const normalizedTitle = normalizeTitle(trimmedTitle);
-            if (!normalizedTitle || seen.has(normalizedTitle)) {
-              continue;
-            }
-
-            seen.add(normalizedTitle);
-            deduped.push(trimmedTitle);
-          }
-          return deduped;
-        };
-
-        const asString = (value: unknown): string => (typeof value === "string" ? value : "");
-        const asStringArray = (value: unknown): string[] => Array.isArray(value) ? value.map(asString).filter(Boolean) : [];
-        const asAuthorNames = (value: unknown): string[] =>
-          Array.isArray(value)
-            ? value
-                .map((author) => (author && typeof author === "object" ? asString((author as Record<string, unknown>).name) : ""))
-                .filter(Boolean)
-            : [];
-
-        const extractTitleCandidatesFromDocument = (): string[] => {
-          const candidates: string[] = [];
-          const pageTitle = document.title.replace(/\s+manga information$/i, "").trim();
-          if (pageTitle) {
-            const pageTitleMatch = pageTitle.match(/^(.+?)\s*\((.+)\)$/);
-            if (pageTitleMatch) {
-              candidates.push(pageTitleMatch[1], pageTitleMatch[2]);
-            } else {
-              candidates.push(pageTitle);
-            }
-          }
-
-          const heading = document.querySelector("h1");
-          if (heading?.textContent) {
-            candidates.push(heading.textContent);
-          }
-
-          const titleScopes = [heading?.parentElement, heading?.parentElement?.nextElementSibling].filter(
-            (scope): scope is Element => Boolean(scope),
-          );
-
-          for (const scope of titleScopes) {
-            const nodes = Array.from(
-              scope.querySelectorAll("h1, h2, div[title], span[title], div.text-muted-foreground, span.text-muted-foreground"),
-            );
-            for (const node of nodes) {
-              const text = node.textContent?.trim();
-              if (text) {
-                candidates.push(text);
-              }
-
-              if (node instanceof HTMLElement) {
-                const titledText = node.getAttribute("title")?.trim();
-                if (titledText) {
-                  candidates.push(titledText);
-                }
-              }
-            }
-          }
-
-          return dedupeTitles(candidates);
-        };
-
-        const scripts = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
-        for (const script of scripts) {
-          const textContent = script.textContent?.trim();
-          if (!textContent) {
-            continue;
-          }
-
-          try {
-            const data = JSON.parse(textContent) as Record<string, unknown>;
-            if (data["@type"] !== "CreativeWork") {
-              continue;
-            }
-
-            const titles = dedupeTitles([
-              ...extractTitleCandidatesFromDocument(),
-              asString(data.alternativeHeadline),
-              ...asStringArray(data.alternateName),
-              asString(data.name),
-            ]);
-            if (titles.length > 0) {
-              return { titles, authors: asAuthorNames(data.author) };
-            }
-          } catch {
-          }
-        }
-
-        const fallbackTitles = extractTitleCandidatesFromDocument();
-        return fallbackTitles.length > 0 ? { titles: fallbackTitles, authors: [] } : null;
-      },
-    });
-
-    const payload = results?.[0]?.result as ExtractedMetadataPayload | null | undefined;
-    return payload && payload.titles.length > 0 ? payload : null;
+    const activeContext = currentPageContextClient?.getLastContext() ?? currentPageContext;
+    const contextTitle = activeContext
+      && (activeContext.seriesId === numericSeriesId || activeContext.seriesId === apiSeries.id)
+      ? activeContext.resolvedTitle
+      : null;
+    return {
+      seriesId,
+      sourceUrl: apiSeries.canonicalUrl,
+      primaryTitle: resolveDisplayTitle(resolved, contextTitle),
+      titles: resolved.orderedTitles,
+      authors: apiSeries.authors,
+      apiSeries,
+    };
   } catch (error) {
-    if (isPopupMissingTabError(error)) {
-      currentTabId = null;
+    if (
+      error instanceof MangaBakaApiError
+      && (error.status === 404 || error.status === 410 || error.code === "deleted_series")
+    ) {
+      throw new InvalidMangaBakaPageError();
     }
-
-    return null;
+    if (error instanceof InvalidMangaBakaPageError) {
+      throw error;
+    }
+    const message = error instanceof Error ? error.message : "MangaBaka metadata is unavailable.";
+    throw new Error(`${message} Retry the lookup.`);
+  } finally {
+    window.clearTimeout(timeoutId);
   }
-}
-
-function extractMetadataFromHtml(html: string): ExtractedMetadataPayload | null {
-  const documentNode = new DOMParser().parseFromString(html, "text/html");
-  const fallbackTitles = extractTitleCandidatesFromDocument(documentNode);
-  const scripts = Array.from(documentNode.querySelectorAll('script[type="application/ld+json"]'));
-
-  for (const script of scripts) {
-    const textContent = script.textContent?.trim();
-    if (!textContent) {
-      continue;
-    }
-
-    try {
-      const data = JSON.parse(textContent) as Record<string, unknown>;
-      if (data["@type"] !== "CreativeWork") {
-        continue;
-      }
-
-      const titles = dedupeTitles([
-        ...fallbackTitles,
-        asString(data.alternativeHeadline),
-        ...asStringArray(data.alternateName),
-        asString(data.name),
-      ]);
-      if (titles.length > 0) {
-        return { titles, authors: asAuthorNames(data.author) };
-      }
-    } catch {
-    }
-  }
-
-  return fallbackTitles.length > 0 ? { titles: fallbackTitles, authors: [] } : null;
 }
 
 async function searchProviders(
@@ -2619,560 +2812,394 @@ async function searchProviders(
   rejectedUrls: RejectedProviderUrls,
   titleAttemptIndexes: Record<ProviderKey, number>,
 ): Promise<LookupResults> {
-  const atsu = currentSettings.enabledProviders.atsu ? await searchAtsumaru(metadata, rejectedUrls.atsu, titleAttemptIndexes.atsu) : null;
-  const mangadex = currentSettings.enabledProviders.mangadex ? await searchMangaDex(metadata, rejectedUrls.mangadex, titleAttemptIndexes.mangadex) : null;
-  const ehentai = currentSettings.enabledProviders.ehentai ? await searchEHentai(metadata, rejectedUrls.ehentai, titleAttemptIndexes.ehentai, "e-hentai") : null;
-  const exhentai = currentSettings.enabledProviders.exhentai ? await searchEHentai(metadata, rejectedUrls.exhentai, titleAttemptIndexes.exhentai, "exhentai") : null;
-  const comixto = null;
-  const mangafire = currentSettings.enabledProviders.mangafire ? await searchMangaFire(metadata, rejectedUrls.mangafire, titleAttemptIndexes.mangafire) : null;
-  const weebcentral = currentSettings.enabledProviders.weebcentral ? await searchWeebCentral(metadata, rejectedUrls.weebcentral, titleAttemptIndexes.weebcentral) : null;
+  const results = createEmptyLookupResults();
+  currentProviderSearchOutcomes = {};
+  const enabledProviderKeys = PROVIDER_KEYS.filter(
+    (providerKey) => currentSettings.enabledProviders[providerKey] && providerKey !== "comixto",
+  );
+  const settledSearches = await Promise.allSettled(
+    enabledProviderKeys.map((providerKey) =>
+      searchProviderOutcome(providerKey, metadata, rejectedUrls, titleAttemptIndexes)),
+  );
 
-  return { atsu, mangadex, ehentai, exhentai, comixto, mangafire, weebcentral };
+  settledSearches.forEach((settled, index) => {
+    const providerKey = enabledProviderKeys[index];
+    const outcome: ProviderSearchOutcome = settled.status === "fulfilled"
+      ? settled.value
+      : {
+          kind: "unavailable",
+          reason: "network",
+          providerId: providerKey as ProviderId,
+          message: "Provider search failed unexpectedly",
+        };
+    currentProviderSearchOutcomes[providerKey] = outcome;
+    results[providerKey] = outcome.kind === "found" ? outcome.value : null;
+  });
+
+  return results;
 }
 
-async function searchProvider(
+async function searchProviderOutcome(
   providerKey: ProviderKey,
   metadata: MangaBakaMetadata,
   rejectedUrls: RejectedProviderUrls,
   titleAttemptIndexes: Record<ProviderKey, number>,
-): Promise<ProviderMatch | null> {
+): Promise<ProviderSearchOutcome> {
+  if (__ADULT_PROVIDERS_ENABLED__ && (providerKey === "ehentai" || providerKey === "exhentai")) {
+    return searchEHentai(metadata, rejectedUrls[providerKey], titleAttemptIndexes[providerKey], providerKey);
+  }
+
   switch (providerKey) {
     case "atsu":
       return searchAtsumaru(metadata, rejectedUrls.atsu, titleAttemptIndexes.atsu);
     case "mangadex":
       return searchMangaDex(metadata, rejectedUrls.mangadex, titleAttemptIndexes.mangadex);
-    case "ehentai":
-      return searchEHentai(metadata, rejectedUrls.ehentai, titleAttemptIndexes.ehentai, "e-hentai");
-    case "exhentai":
-      return searchEHentai(metadata, rejectedUrls.exhentai, titleAttemptIndexes.exhentai, "exhentai");
     case "comixto":
-      return null;
+      return {
+        kind: "unsupported",
+        providerId: "comixto",
+        message: "Comix support is planned but not enabled",
+      };
     case "mangafire":
       return searchMangaFire(metadata, rejectedUrls.mangafire, titleAttemptIndexes.mangafire);
     case "weebcentral":
       return searchWeebCentral(metadata, rejectedUrls.weebcentral, titleAttemptIndexes.weebcentral);
     default:
-      return null;
+      return {
+        kind: "unsupported",
+        providerId: providerKey as ProviderId,
+        message: "Provider is not supported by this build",
+      };
   }
+}
+
+function showProviderSearchOutcome(providerLabel: string, outcome: ProviderSearchOutcome): void {
+  switch (outcome.kind) {
+    case "blocked":
+      setStatus(`${providerLabel} blocked automated search. Use Open Search to continue manually.`, "error");
+      break;
+    case "rate_limited":
+      setStatus(`${providerLabel} rate limited this attempt. Retry later without changing titles.`, "error");
+      break;
+    case "auth_required":
+      setStatus(`${providerLabel} requires sign-in. Use Open Search to continue manually.`, "error");
+      break;
+    case "unavailable":
+      setStatus(
+        outcome.reason === "timeout"
+          ? `${providerLabel} timed out. The current title was not consumed.`
+          : `${providerLabel} is unavailable. The current title was not consumed.`,
+        "error",
+      );
+      break;
+    case "error":
+      setStatus(`${providerLabel} returned an unexpected response. The current title was not consumed.`, "error");
+      break;
+    case "unsupported":
+      setStatus(`${providerLabel} is not supported by this build.`, "error");
+      break;
+    case "found":
+      setStatus("Search complete", "success");
+      break;
+    case "no_match":
+      setStatus(`No ${providerLabel} match found for this title`, "error");
+      break;
+  }
+}
+
+function retypeProviderOutcome<T>(outcome: ProviderOutcome<unknown>): ProviderOutcome<T> {
+  return outcome as ProviderOutcome<T>;
+}
+
+async function fetchAndParseProviderResponse<T>(
+  providerId: ProviderId,
+  request: ProviderSearchRequest,
+  parseResponse: (body: string) => ProviderOutcome<T>,
+): Promise<ProviderOutcome<T>> {
+  const transport = await fetchProviderSearchRequest(providerId, request);
+  if (transport.kind !== "found") {
+    return retypeProviderOutcome<T>(transport);
+  }
+  return parseResponse(transport.value.body);
+}
+
+async function fetchProviderSearchCandidates(
+  providerId: ProviderId,
+  title: string,
+): Promise<ProviderOutcome<ProviderSearchCandidate[]>> {
+  const adapter = getProviderAdapter(providerId);
+  if (!adapter?.buildSearchRequest || !adapter.parseSearchResponse) {
+    return {
+      kind: "unsupported",
+      providerId,
+      message: "Provider does not expose an automated search adapter",
+    };
+  }
+  return fetchAndParseProviderResponse(
+    providerId,
+    adapter.buildSearchRequest(title),
+    adapter.parseSearchResponse,
+  );
+}
+
+function pickBestProviderSearchCandidate(
+  candidates: readonly ProviderSearchCandidate[],
+  metadata: MangaBakaMetadata,
+  rejectedUrls: readonly string[],
+): ProviderSearchCandidate | null {
+  const normalizedSourceTitles = metadata.titles.map(normalizeTitle).filter(Boolean);
+  const rejectedUrlSet = new Set(rejectedUrls);
+  let best: { candidate: ProviderSearchCandidate; score: number } | null = null;
+  for (const candidate of candidates) {
+    if (rejectedUrlSet.has(candidate.url)) {
+      continue;
+    }
+    const candidateTitles = dedupeTitles([candidate.title, ...candidate.aliases]);
+    const score = Math.max(0, ...candidateTitles.map((title) => scoreTitleMatch(title, normalizedSourceTitles)));
+    if (score < 90 || (best && score <= best.score)) {
+      continue;
+    }
+    best = { candidate, score };
+  }
+  return best?.candidate ?? null;
+}
+
+function noProviderMatch(providerId: ProviderId, message = "No matching provider title was found"): ProviderSearchOutcome {
+  return { kind: "no_match", providerId, message };
 }
 
 async function searchAtsumaru(
   metadata: MangaBakaMetadata,
   rejectedUrls: string[],
   titleIndex: number,
-): Promise<ProviderMatch | null> {
-  const rejectedUrlSet = new Set(rejectedUrls);
-  const normalizedSourceTitles = metadata.titles.map(normalizeTitle).filter(Boolean);
-  const candidates = new Map<string, { id: string; title: string; score: number }>();
+): Promise<ProviderSearchOutcome> {
   const title = metadata.titles[titleIndex];
   if (!title) {
-    return null;
+    return noProviderMatch("atsu", "No title remains for this Atsumaru attempt");
   }
 
-  try {
-    const searchParams = new URLSearchParams({
-      q: title,
-      query_by: "title,otherNames",
-      include_fields: "id,title,otherNames,hidden",
-      filter_by: "hidden:=false",
-      per_page: "20",
-    });
-    const response = await fetch(`https://atsu.moe/collections/manga/documents/search?${searchParams.toString()}`, {
-      headers: { accept: "application/json" },
-    });
-    if (!response.ok) {
-      return null;
-    }
-
-    const payload = (await response.json()) as AtsuSearchResponse;
-    for (const hit of payload.hits ?? []) {
-      const document = hit.document;
-      if (!document?.id || document.hidden) {
-        continue;
-      }
-
-      const titles = dedupeTitles([document.title ?? "", ...(document.otherNames ?? [])]);
-      if (titles.length === 0) {
-        continue;
-      }
-
-      const displayTitle = pickPreferredTitle(titles);
-      const url = `https://atsu.moe/manga/${document.id}`;
-      if (rejectedUrlSet.has(url)) {
-        continue;
-      }
-
-      const score = Math.max(0, ...titles.map((entryTitle) => scoreTitleMatch(entryTitle, normalizedSourceTitles)));
-      if (score < 90) {
-        continue;
-      }
-
-      const existingCandidate = candidates.get(document.id);
-      if (!existingCandidate || score > existingCandidate.score) {
-        candidates.set(document.id, { id: document.id, title: displayTitle, score });
-      }
-    }
-  } catch {
-    return null;
+  const candidateOutcome = await fetchProviderSearchCandidates("atsu", title);
+  if (candidateOutcome.kind !== "found") {
+    return retypeProviderOutcome<ProviderMatch>(candidateOutcome);
   }
-
-  const bestMatch = pickBestCandidate(candidates);
+  const bestMatch = pickBestProviderSearchCandidate(candidateOutcome.value, metadata, rejectedUrls);
   if (!bestMatch) {
-    return null;
+    return noProviderMatch("atsu");
   }
+
+  const latestChapterOutcome = bestMatch.seriesId
+    ? await fetchAndParseProviderResponse(
+        "atsu",
+        buildAtsumaruMangaPageRequest(bestMatch.seriesId),
+        parseAtsumaruLatestChapterResponse,
+      )
+    : null;
 
   return {
-    provider: "Atsumaru",
-    title: bestMatch.title,
-    url: `https://atsu.moe/manga/${bestMatch.id}`,
-    latestChapterNumber: await fetchAtsumaruLatestChapterNumber(bestMatch.id),
-    latestChapterLanguage: "en",
+    kind: "found",
+    providerId: "atsu",
+    value: {
+      provider: "Atsumaru",
+      title: bestMatch.title,
+      url: bestMatch.url,
+      latestChapterNumber: latestChapterOutcome?.kind === "found" ? latestChapterOutcome.value.label : null,
+      latestChapterLanguage: "en",
+    },
   };
 }
 
-async function fetchAtsumaruLatestChapterNumber(mangaId: string): Promise<string | null> {
-  try {
-    const response = await fetch(`https://atsu.moe/api/manga/page?id=${encodeURIComponent(mangaId)}`, {
-      headers: { accept: "application/json" },
-    });
-    if (!response.ok) {
-      return null;
-    }
-
-    const payload = (await response.json()) as AtsuMangaPageResponse;
-    const chapters = payload.mangaPage?.chapters ?? [];
-    const sortedChapters = [...chapters].sort((left, right) => {
-      const chapterDiff = toChapterSortValue(right.number) - toChapterSortValue(left.number);
-      if (chapterDiff !== 0) {
-        return chapterDiff;
-      }
-
-      const indexDiff = (right.index ?? 0) - (left.index ?? 0);
-      if (indexDiff !== 0) {
-        return indexDiff;
-      }
-
-      return (right.createdAt ?? 0) - (left.createdAt ?? 0);
-    });
-
-    for (const chapter of sortedChapters) {
-      const titledPageNumber = formatAtsumaruChapterLabel(chapter.title, chapter.number);
-      if (titledPageNumber) {
-        return titledPageNumber;
-      }
-
-      const chapterNumber = formatChapterNumber(chapter.number);
-      if (chapterNumber) {
-        return chapterNumber;
-      }
-    }
-
-    return null;
-  } catch {
-    return null;
+async function fetchAtsumaruLatestChapterNumber(mangaId: string): Promise<ProviderOutcome<string | null>> {
+  const outcome = await fetchAndParseProviderResponse(
+    "atsu",
+    buildAtsumaruMangaPageRequest(mangaId),
+    parseAtsumaruLatestChapterResponse,
+  );
+  if (outcome.kind === "found") {
+    return { kind: "found", providerId: "atsu", value: outcome.value.label };
   }
+  if (outcome.kind === "no_match") {
+    return { kind: "found", providerId: "atsu", value: null };
+  }
+  return retypeProviderOutcome<string | null>(outcome);
 }
 
 async function searchMangaDex(
   metadata: MangaBakaMetadata,
   rejectedUrls: string[],
   titleIndex: number,
-): Promise<ProviderMatch | null> {
-  const rejectedUrlSet = new Set(rejectedUrls);
-  const normalizedSourceTitles = metadata.titles.map(normalizeTitle).filter(Boolean);
-  const candidates = new Map<string, { id: string; title: string; score: number }>();
+): Promise<ProviderSearchOutcome> {
   const title = metadata.titles[titleIndex];
   if (!title) {
-    return null;
+    return noProviderMatch("mangadex", "No title remains for this MangaDex attempt");
   }
 
-  try {
-    const response = await fetch(`https://api.mangadex.org/manga?title=${encodeURIComponent(title)}&limit=10`, {
-      headers: { accept: "application/json" },
-    });
-    if (!response.ok) {
-      return null;
-    }
-
-    const payload = (await response.json()) as MangaDexResponse;
-    for (const entry of payload.data ?? []) {
-      const titles = getMangaDexTitles(entry);
-      const score = Math.max(0, ...titles.map((entryTitle) => scoreTitleMatch(entryTitle, normalizedSourceTitles)));
-      if (score < 90) {
-        continue;
-      }
-
-      const displayTitle = pickPreferredTitle(titles);
-      const url = `https://mangadex.org/title/${entry.id}/${slugifyTitle(displayTitle)}`;
-      if (rejectedUrlSet.has(url)) {
-        continue;
-      }
-
-      const existingCandidate = candidates.get(entry.id);
-      if (!existingCandidate || score > existingCandidate.score) {
-        candidates.set(entry.id, { id: entry.id, title: displayTitle, score });
-      }
-    }
-  } catch {
-    return null;
+  const candidateOutcome = await fetchProviderSearchCandidates("mangadex", title);
+  if (candidateOutcome.kind !== "found") {
+    return retypeProviderOutcome<ProviderMatch>(candidateOutcome);
+  }
+  const bestMatch = pickBestProviderSearchCandidate(candidateOutcome.value, metadata, rejectedUrls);
+  if (!bestMatch?.seriesId) {
+    return noProviderMatch("mangadex");
   }
 
-  const bestMatch = pickBestCandidate(candidates);
-  if (!bestMatch) {
-    return null;
+  const [feedOutcome, metadataOutcome] = await Promise.all([
+    fetchAndParseProviderResponse(
+      "mangadex",
+      buildMangaDexChapterFeedRequest(bestMatch.seriesId),
+      parseMangaDexChapterFeedResponse,
+    ),
+    fetchAndParseProviderResponse(
+      "mangadex",
+      buildMangaDexTitleMetadataRequest(bestMatch.seriesId),
+      parseMangaDexTitleMetadataResponse,
+    ),
+  ]);
+  if (feedOutcome.kind !== "found") {
+    return retypeProviderOutcome<ProviderMatch>(feedOutcome);
+  }
+  if (metadataOutcome.kind !== "found") {
+    return retypeProviderOutcome<ProviderMatch>(metadataOutcome);
   }
 
-  const latestEnglishChapterInfo = await fetchMangaDexLatestEnglishChapterInfo(bestMatch.id);
+  const chapterAvailability = classifyMangaDexChapterAvailability(feedOutcome.value, metadataOutcome.value);
   return {
-    provider: "MangaDex",
-    title: bestMatch.title,
-    url: `https://mangadex.org/title/${bestMatch.id}/${slugifyTitle(bestMatch.title)}`,
-    latestChapterNumber: latestEnglishChapterInfo.latestChapterNumber,
-    latestChapterLanguage: latestEnglishChapterInfo.latestChapterLanguage,
-    mangaDexChapterState: latestEnglishChapterInfo.mangaDexChapterState,
-    manualPurgedChapterNumber: null,
-    manualMangaDexChapterState: null,
+    kind: "found",
+    providerId: "mangadex",
+    value: {
+      provider: "MangaDex",
+      title: bestMatch.title,
+      url: bestMatch.url,
+      latestChapterNumber: chapterAvailability.latestChapterNumber,
+      latestChapterLanguage: chapterAvailability.state === "available" ? "en" : null,
+      mangaDexChapterState: chapterAvailability.state === "available" ? null : chapterAvailability.state,
+      manualPurgedChapterNumber: null,
+      manualMangaDexChapterState: null,
+    },
   };
 }
 
 async function fetchMangaDexLatestEnglishChapterInfo(
   mangaId: string,
-): Promise<Pick<ProviderMatch, "latestChapterNumber" | "latestChapterLanguage" | "mangaDexChapterState">> {
-  try {
-    const response = await fetch(
-      `https://api.mangadex.org/manga/${encodeURIComponent(mangaId)}/feed?translatedLanguage[]=en&order[publishAt]=desc&limit=25`,
-      { headers: { accept: "application/json" } },
-    );
-    if (!response.ok) {
-      return {
-        latestChapterNumber: null,
-        latestChapterLanguage: null,
-        mangaDexChapterState: "purged",
-      };
-    }
-
-    const payload = (await response.json()) as MangaDexFeedResponse;
-    for (const chapter of payload.data ?? []) {
-      if (chapter.attributes?.translatedLanguage !== "en") {
-        continue;
-      }
-
-      const chapterNumber = formatChapterNumber(chapter.attributes?.chapter ?? null);
-      if (chapterNumber) {
-        return {
-          latestChapterNumber: chapterNumber,
-          latestChapterLanguage: "en",
-          mangaDexChapterState: null,
-        };
-      }
-    }
-
-    const hasAnyChapters = await fetchMangaDexHasAnyChapters(mangaId);
-    if (hasAnyChapters) {
-      return {
-        latestChapterNumber: null,
-        latestChapterLanguage: null,
-        mangaDexChapterState: "purged",
-      };
-    }
-
-    const hasUnavailableChapters = await fetchMangaDexHasUnavailableChapters(mangaId);
-    return {
-      latestChapterNumber: null,
-      latestChapterLanguage: null,
-      mangaDexChapterState: hasUnavailableChapters ? "purged" : "no_chapters_tld",
-    };
-  } catch {
-    return {
-      latestChapterNumber: null,
-      latestChapterLanguage: null,
-      mangaDexChapterState: "purged",
-    };
+): Promise<ProviderOutcome<Pick<ProviderMatch, "latestChapterNumber" | "latestChapterLanguage" | "mangaDexChapterState">>> {
+  const [feedOutcome, metadataOutcome] = await Promise.all([
+    fetchAndParseProviderResponse(
+      "mangadex",
+      buildMangaDexChapterFeedRequest(mangaId),
+      parseMangaDexChapterFeedResponse,
+    ),
+    fetchAndParseProviderResponse(
+      "mangadex",
+      buildMangaDexTitleMetadataRequest(mangaId),
+      parseMangaDexTitleMetadataResponse,
+    ),
+  ]);
+  if (feedOutcome.kind !== "found") {
+    return retypeProviderOutcome(feedOutcome);
   }
-}
-
-async function fetchMangaDexHasAnyChapters(mangaId: string): Promise<boolean> {
-  try {
-    const response = await fetch(
-      `https://api.mangadex.org/manga/${encodeURIComponent(mangaId)}/feed?order[publishAt]=desc&limit=1`,
-      { headers: { accept: "application/json" } },
-    );
-    if (!response.ok) {
-      return true;
-    }
-
-    const payload = (await response.json()) as MangaDexFeedResponse;
-    return (payload.data?.length ?? 0) > 0;
-  } catch {
-    return true;
+  if (metadataOutcome.kind !== "found") {
+    return retypeProviderOutcome(metadataOutcome);
   }
-}
 
-async function fetchMangaDexHasUnavailableChapters(mangaId: string): Promise<boolean> {
-  try {
-    const response = await fetch(`https://api.mangadex.org/manga/${encodeURIComponent(mangaId)}`, {
-      headers: { accept: "application/json" },
-    });
-    if (!response.ok) {
-      return true;
-    }
-
-    const payload = (await response.json()) as MangaDexMangaResponse;
-    const availableTranslatedLanguages = payload.data?.attributes?.availableTranslatedLanguages ?? [];
-    const latestUploadedChapter = payload.data?.attributes?.latestUploadedChapter;
-    return availableTranslatedLanguages.length > 0 || (typeof latestUploadedChapter === "string" && latestUploadedChapter.length > 0);
-  } catch {
-    return true;
-  }
+  const availability = classifyMangaDexChapterAvailability(feedOutcome.value, metadataOutcome.value);
+  return {
+    kind: "found",
+    providerId: "mangadex",
+    value: {
+      latestChapterNumber: availability.latestChapterNumber,
+      latestChapterLanguage: availability.state === "available" ? "en" : null,
+      mangaDexChapterState: availability.state === "available" ? null : availability.state,
+    },
+  };
 }
 
 async function searchEHentai(
   metadata: MangaBakaMetadata,
   rejectedUrls: string[],
   titleIndex: number,
-  domain: "e-hentai" | "exhentai",
-): Promise<ProviderMatch | null> {
-  const rejectedUrlSet = new Set(rejectedUrls);
-  const normalizedSourceTitles = metadata.titles.map(normalizeTitle).filter(Boolean);
-  const queryTitles = buildEHentaiQueryTitles(metadata.titles.slice(titleIndex));
-  if (queryTitles.length === 0) {
-    return null;
+  providerKey: "ehentai" | "exhentai",
+): Promise<ProviderSearchOutcome> {
+  const title = metadata.titles[titleIndex];
+  if (!title) {
+    return noProviderMatch(providerKey, "No title remains for this provider attempt");
   }
-  const candidates = new Map<string, { url: string; title: string; score: number }>();
-
-  for (const title of queryTitles) {
-    let html = "";
-    try {
-      const response = await fetch(`https://${domain}.org/?f_search=${encodeURIComponent(title)}`, {
-        headers: { accept: "text/html" },
-        credentials: "include",
-      });
-      if (!response.ok) {
-        continue;
-      }
-
-      html = await response.text();
-    } catch {
-    }
-
-    const searchResults = extractEHentaiSearchResults(html, domain);
-    for (const result of searchResults) {
-      let parsedUrl: URL;
-      try {
-        parsedUrl = new URL(result.url);
-      } catch {
-        continue;
-      }
-
-      const canonicalUrl = canonicalizeEHentaiGalleryUrl(parsedUrl, domain);
-      if (!canonicalUrl || rejectedUrlSet.has(canonicalUrl)) {
-        continue;
-      }
-
-      const candidateTitles = extractEHentaiTitleCandidates(result.title);
-      const score = Math.max(0, ...candidateTitles.map((candidateTitle) => scoreTitleMatch(candidateTitle, normalizedSourceTitles)));
-      if (score < 90) {
-        continue;
-      }
-
-      const displayTitle = cleanEHentaiGalleryTitle(result.title) || result.title;
-      const existingCandidate = candidates.get(canonicalUrl);
-      if (!existingCandidate || score > existingCandidate.score) {
-        candidates.set(canonicalUrl, { url: canonicalUrl, title: displayTitle, score });
-      }
-    }
+  const candidateOutcome = await fetchProviderSearchCandidates(providerKey, title);
+  if (candidateOutcome.kind !== "found") {
+    return retypeProviderOutcome<ProviderMatch>(candidateOutcome);
   }
-
-  const bestMatch = pickBestCandidate(candidates);
+  const bestMatch = pickBestProviderSearchCandidate(candidateOutcome.value, metadata, rejectedUrls);
   if (!bestMatch) {
-    return null;
+    return noProviderMatch(providerKey);
   }
 
   return {
-    provider: domain === "e-hentai" ? "E-Hentai" : "ExHentai",
-    title: bestMatch.title,
-    url: bestMatch.url,
-    latestChapterNumber: null,
-    latestChapterLanguage: null,
+    kind: "found",
+    providerId: providerKey,
+    value: {
+      provider: providerKey === "ehentai" ? "E-Hentai" : "ExHentai",
+      title: bestMatch.title,
+      url: bestMatch.url,
+      latestChapterNumber: null,
+      latestChapterLanguage: null,
+    },
   };
 }
 
-async function searchMangaFire(metadata: MangaBakaMetadata, rejectedUrls: string[], titleIndex: number): Promise<ProviderMatch | null> {
-  return searchViaYahoo(metadata, rejectedUrls, titleIndex, {
-    provider: "MangaFire",
-    siteQuery: "site:mangafire.to/manga",
-    matchUrl(url) {
-      return url.hostname === "mangafire.to" && url.pathname.startsWith("/manga/");
-    },
-    canonicalizeUrl(url) {
-      const segments = url.pathname.split("/").filter(Boolean);
-      if (segments.length < 2 || segments[0] !== "manga") {
-        return null;
-      }
-
-      return `https://mangafire.to/manga/${segments[1]}`;
-    },
-    getCandidateTitles(result, url) {
-      return dedupeTitles([
-        cleanMangaFireResultTitle(result.title),
-        getMangaFireTitleFromUrl(url),
-      ]);
-    },
-    getDisplayTitle(result, url) {
-      return getMangaFireTitleFromUrl(url) || cleanMangaFireResultTitle(result.title) || "MangaFire";
-    },
-  });
-}
-
-async function searchWeebCentral(metadata: MangaBakaMetadata, rejectedUrls: string[], titleIndex: number): Promise<ProviderMatch | null> {
-  return searchViaYahoo(metadata, rejectedUrls, titleIndex, {
-    provider: "WeebCentral",
-    siteQuery: "site:weebcentral.com/series",
-    matchUrl(url) {
-      return url.hostname === "weebcentral.com" && url.pathname.startsWith("/series/");
-    },
-    canonicalizeUrl(url) {
-      const segments = url.pathname.split("/").filter(Boolean);
-      if (segments.length < 3 || segments[0] !== "series") {
-        return null;
-      }
-
-      return `https://weebcentral.com/series/${segments[1]}/${segments[2]}`;
-    },
-    getCandidateTitles(result, url) {
-      return dedupeTitles([
-        cleanWeebCentralResultTitle(result.title),
-        getWeebCentralTitleFromUrl(url),
-      ]);
-    },
-    getDisplayTitle(result, url) {
-      return getWeebCentralTitleFromUrl(url) || cleanWeebCentralResultTitle(result.title) || "WeebCentral";
-    },
-  });
-}
-
-async function searchViaYahoo(
+async function searchMangaFire(
   metadata: MangaBakaMetadata,
   rejectedUrls: string[],
   titleIndex: number,
-  config: {
-    provider: ProviderMatch["provider"];
-    siteQuery: string;
-    matchUrl: (url: URL) => boolean;
-    canonicalizeUrl: (url: URL) => string | null;
-    getCandidateTitles: (result: SearchResultEntry, url: URL) => string[];
-    getDisplayTitle: (result: SearchResultEntry, url: URL) => string;
-  },
-): Promise<ProviderMatch | null> {
-  const rejectedUrlSet = new Set(rejectedUrls);
-  const normalizedSourceTitles = metadata.titles.map(normalizeTitle).filter(Boolean);
+): Promise<ProviderSearchOutcome> {
   const title = metadata.titles[titleIndex];
   if (!title) {
-    return null;
+    return noProviderMatch("mangafire", "No title remains for this MangaFire attempt");
   }
-
-  let html = "";
-  try {
-    const response = await fetch(
-      `https://search.yahoo.com/search?p=${encodeURIComponent(`${config.siteQuery} ${title}`)}`,
-      { headers: { accept: "text/html" } },
-    );
-    if (!response.ok) {
-      return null;
-    }
-
-    html = await response.text();
-  } catch {
-    return null;
+  const candidateOutcome = await fetchProviderSearchCandidates("mangafire", title);
+  if (candidateOutcome.kind !== "found") {
+    return retypeProviderOutcome<ProviderMatch>(candidateOutcome);
   }
-
-  const searchResults = extractYahooSearchResults(html);
-  const candidates = new Map<string, { url: string; title: string; score: number }>();
-
-  for (const result of searchResults) {
-    let parsedUrl: URL;
-    try {
-      parsedUrl = new URL(result.url);
-    } catch {
-      continue;
-    }
-
-    if (!config.matchUrl(parsedUrl)) {
-      continue;
-    }
-
-    const canonicalUrl = config.canonicalizeUrl(parsedUrl);
-    if (!canonicalUrl || rejectedUrlSet.has(canonicalUrl)) {
-      continue;
-    }
-
-    const candidateTitles = config.getCandidateTitles(result, parsedUrl);
-    const score = Math.max(0, ...candidateTitles.map((candidateTitle) => scoreTitleMatch(candidateTitle, normalizedSourceTitles)));
-    if (score < 90) {
-      continue;
-    }
-
-    const displayTitle = config.getDisplayTitle(result, parsedUrl);
-    const existingCandidate = candidates.get(canonicalUrl);
-    if (!existingCandidate || score > existingCandidate.score) {
-      candidates.set(canonicalUrl, { url: canonicalUrl, title: displayTitle, score });
-    }
-  }
-
-  const bestMatch = pickBestCandidate(candidates);
-  if (!bestMatch) {
-    return null;
-  }
-
-  return {
-    provider: config.provider,
-    title: bestMatch.title,
-    url: bestMatch.url,
-    latestChapterNumber: null,
-    latestChapterLanguage: null,
-  };
+  const bestMatch = pickBestProviderSearchCandidate(candidateOutcome.value, metadata, rejectedUrls);
+  return bestMatch
+    ? {
+        kind: "found",
+        providerId: "mangafire",
+        value: {
+          provider: "MangaFire",
+          title: bestMatch.title,
+          url: bestMatch.url,
+          latestChapterNumber: null,
+          latestChapterLanguage: null,
+        },
+      }
+    : noProviderMatch("mangafire");
 }
 
-function extractYahooSearchResults(html: string): SearchResultEntry[] {
-  const documentNode = new DOMParser().parseFromString(html, "text/html");
-  const anchors = Array.from(documentNode.querySelectorAll<HTMLAnchorElement>('a[href^="https://r.search.yahoo.com/"]'));
-  const seenUrls = new Set<string>();
-  const results: SearchResultEntry[] = [];
-
-  for (const anchor of anchors) {
-    const redirectUrl = anchor.getAttribute("href")?.trim();
-    if (!redirectUrl) {
-      continue;
-    }
-
-    const decodedUrl = decodeYahooRedirectUrl(redirectUrl);
-    if (!decodedUrl || !decodedUrl.startsWith("http") || seenUrls.has(decodedUrl)) {
-      continue;
-    }
-
-    const title = anchor.textContent?.trim() ?? "";
-    if (!title) {
-      continue;
-    }
-
-    seenUrls.add(decodedUrl);
-    results.push({ url: decodedUrl, title, cite: "" });
+async function searchWeebCentral(
+  metadata: MangaBakaMetadata,
+  rejectedUrls: string[],
+  titleIndex: number,
+): Promise<ProviderSearchOutcome> {
+  const title = metadata.titles[titleIndex];
+  if (!title) {
+    return noProviderMatch("weebcentral", "No title remains for this WeebCentral attempt");
   }
-
-  return results;
-}
-
-function decodeYahooRedirectUrl(redirectUrl: string): string | null {
-  const match = redirectUrl.match(/\/RU=([^/]+)\//);
-  if (!match) {
-    return null;
+  const candidateOutcome = await fetchProviderSearchCandidates("weebcentral", title);
+  if (candidateOutcome.kind !== "found") {
+    return retypeProviderOutcome<ProviderMatch>(candidateOutcome);
   }
-
-  try {
-    return decodeURIComponent(match[1]);
-  } catch {
-    return null;
-  }
+  const bestMatch = pickBestProviderSearchCandidate(candidateOutcome.value, metadata, rejectedUrls);
+  return bestMatch
+    ? {
+        kind: "found",
+        providerId: "weebcentral",
+        value: {
+          provider: "WeebCentral",
+          title: bestMatch.title,
+          url: bestMatch.url,
+          latestChapterNumber: null,
+          latestChapterLanguage: null,
+        },
+      }
+    : noProviderMatch("weebcentral");
 }
 
 function extractEHentaiSearchResults(html: string, domain: "e-hentai" | "exhentai"): EHentaiSearchResult[] {
@@ -3471,36 +3498,28 @@ function toChapterSortValue(value: number | string | null | undefined): number {
   return -1;
 }
 
-function asString(value: unknown): string {
-  return typeof value === "string" ? value : "";
-}
-
-function asStringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.map(asString).filter(Boolean) : [];
-}
-
-function asAuthorNames(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  return value
-    .map((author) => (author && typeof author === "object" ? asString((author as Record<string, unknown>).name) : ""))
-    .filter(Boolean);
-}
-
 async function getAlternatingInactiveTitleMarkup(): Promise<string> {
   const storageKey = "ui:inactiveTitleVariant";
-  const stored = await chrome.storage.local.get(storageKey);
-  const nextVariant = stored[storageKey] === "jp-first" ? "en-first" : "jp-first";
-  void chrome.storage.local.set({ [storageKey]: nextVariant });
+  try {
+    const stored = await chrome.storage.local.get(storageKey);
+    const nextVariant = stored[storageKey] === "jp-first" ? "en-first" : "jp-first";
+    await chrome.storage.local.set({ [storageKey]: nextVariant });
 
-  return nextVariant === "jp-first"
-    ? '<span class="brand-white">マンガ</span> <span class="brand-red">Baka</span>'
-    : '<span class="brand-white">Manga</span> <span class="brand-red">バカ</span>';
+    return nextVariant === "jp-first"
+      ? '<span class="brand-white">マンガ</span> <span class="brand-red">Baka</span>'
+      : '<span class="brand-white">Manga</span> <span class="brand-red">バカ</span>';
+  } catch {
+    return currentInactiveTitleMarkup;
+  }
+}
+
+async function ensureInactiveTitleMarkup(): Promise<void> {
+  inactiveTitleMarkupPromise ??= getAlternatingInactiveTitleMarkup();
+  currentInactiveTitleMarkup = await inactiveTitleMarkupPromise;
 }
 
 async function renderUnsupportedState(): Promise<void> {
+  await ensureInactiveTitleMarkup();
   currentViewState = "unsupported";
   currentProviderPage = null;
   currentCachedResultFlags = {};
@@ -3513,6 +3532,7 @@ async function renderUnsupportedState(): Promise<void> {
 }
 
 async function renderInvalidPageState(): Promise<void> {
+  await ensureInactiveTitleMarkup();
   currentViewState = "invalid";
   currentProviderPage = null;
   currentCachedResultFlags = {};
@@ -3536,9 +3556,7 @@ function renderLoadingState(): void {
     const row = document.createElement("div");
     row.className = "provider-row provider-row--loading";
 
-    const label = document.createElement("div");
-    label.className = `provider-label provider-label--${currentSettings.providerLabelMode}`;
-    label.innerHTML = getProviderLabelMarkup(provider.key, getProviderDisplayLabel(provider.key));
+    const label = buildProviderLabel(provider.key, getProviderDisplayLabel(provider.key));
 
     const value = document.createElement("div");
     value.className = "provider-value";
@@ -3559,19 +3577,22 @@ function renderLookup(cache: CachedLookup, fromCache: boolean): void {
   currentViewState = "lookup";
   currentProviderPage = null;
   getTitleNode().classList.remove("title--inactive");
-  getTitleNode().textContent = cache.primaryTitle;
+  getTitleNode().textContent = resolveCachedDisplayTitle(cache);
 
-  getSubtitleNode().textContent = cache.authors[0] ? `by ${cache.authors[0]}` : "";
+  getSubtitleNode().textContent = cache.series.authors[0] ? `by ${cache.series.authors[0]}` : "";
   renderProviderRows(cache.results, {
     cache,
     emptyLabel: "No Match Found",
     enableProviderReset: true,
   });
-  const hasEnabledProviders = getVisibleProviders().length > 0;
-  setStatus(
-    hasEnabledProviders ? (fromCache ? "Loaded cached result" : "Search complete") : "No providers enabled",
-    hasEnabledProviders ? "success" : "error",
-  );
+  const enabledProviderIds = getVisibleProviders().map((provider) => provider.key as ProviderId);
+  const presentation = getPopupStatusPresentation({
+    kind: "lookup",
+    enabledProviderIds,
+    outcomes: currentProviderSearchOutcomes,
+    fromCache,
+  });
+  setStatus(presentation.message, presentation.tone);
   setResetEnabled(true);
 }
 
@@ -3590,9 +3611,9 @@ function withIndefiniteArticle(label: ProviderMatch["provider"]): string {
   return /^[aeiou]/i.test(label) ? `an ${label}` : `a ${label}`;
 }
 
-function renderProviderPageState(context: ProviderPageContext): void {
+async function renderProviderPageState(context: ProviderPageContext): Promise<void> {
   if (!currentSettings.enabledProviders[context.providerKey]) {
-    void renderUnsupportedState();
+    await renderUnsupportedState();
     return;
   }
 
@@ -3623,9 +3644,7 @@ function renderProviderSearchRows(context: ProviderPageContext): void {
     const row = document.createElement("div");
     row.className = "provider-row";
 
-    const label = document.createElement("div");
-    label.className = `provider-label provider-label--${currentSettings.providerLabelMode}`;
-    label.innerHTML = getProviderLabelMarkup(provider.key, getProviderDisplayLabel(provider.key));
+    const label = buildProviderLabel(provider.key, getProviderDisplayLabel(provider.key));
 
     const value = document.createElement("div");
     value.className = "provider-value";
@@ -3655,7 +3674,7 @@ function renderProviderSearchRows(context: ProviderPageContext): void {
         "action-button action-button--search",
         "Search MangaBaka",
         context.isSearchable
-          ? `Search MangaBaka for ${context.primaryTitle} in ${currentSettings.providerLinkType === "new" ? "a new tab" : "the current tab"}`
+          ? `Search MangaBaka for ${context.primaryTitle} in ${currentSettings.searchLinkType === "new" ? "a new tab" : "the current tab"}`
           : "Search MangaBaka is only available on supported series and chapter pages",
         !context.isSearchable,
         () => {
@@ -3663,7 +3682,10 @@ function renderProviderSearchRows(context: ProviderPageContext): void {
             return;
           }
 
-          void openMangaBakaSearch(context.primaryTitle);
+          runPopupTask(
+            () => openMangaBakaSearch(context.primaryTitle),
+            "Unable to search MangaBaka.",
+          );
         },
       );
       actions.append(searchButton);
@@ -3699,16 +3721,24 @@ function renderProviderRows(
     const retryBusy = retryInProgress[provider.key] === true;
     const canSearchNow = Boolean(options.cache) && providerEnabled && !providerSearched && !providerResult;
     const attemptIndex = options.cache?.titleAttemptIndexes?.[provider.key] ?? 0;
-    const titleCount = options.cache?.titles.length ?? 0;
+    const titleCount = options.cache?.series.rankedSearchTitles.length ?? 0;
+    const searchOutcome = currentProviderSearchOutcomes[provider.key];
+    const manualSearchTitle = options.cache?.series.rankedSearchTitles[attemptIndex]
+      ?? options.cache?.series.rankedSearchTitles[0]
+      ?? "";
+    const providerAdapter = getProviderAdapter(provider.key as ProviderId);
+    const hasTransientOutcome = searchOutcome != null && !isStableProviderSearchOutcome(searchOutcome);
+    const shouldOfferManualSearch = hasTransientOutcome && searchOutcome.kind !== "unsupported";
+    const manualSearchUrl = shouldOfferManualSearch && providerAdapter?.buildManualSearchUrl
+      ? providerAdapter.buildManualSearchUrl(manualSearchTitle)
+      : null;
     const hasNextTitle = attemptIndex < titleCount - 1;
     const isExhausted =
       providerSearched && !providerResult && providerEnabled && titleCount > 0 && !hasNextTitle && attemptIndex > 0 && options.emptyLabel === "No Match Found";
     const row = document.createElement("div");
     row.className = "provider-row";
 
-    const label = document.createElement("div");
-    label.className = `provider-label provider-label--${currentSettings.providerLabelMode}`;
-    label.innerHTML = getProviderLabelMarkup(provider.key, providerLabel);
+    const label = buildProviderLabel(provider.key, providerLabel);
 
     const value = document.createElement("div");
     value.className = "provider-value";
@@ -3720,10 +3750,14 @@ function renderProviderRows(
     main.className = "provider-value-main";
     if (!providerEnabled) {
       main.textContent = "N/A";
-    } else if (canSearchNow) {
-      main.textContent = "Ready to search";
     } else if (providerResult) {
       main.textContent = providerResult.title;
+    } else if (manualSearchUrl) {
+      main.textContent = "Manual search available";
+    } else if (hasTransientOutcome) {
+      main.textContent = "Automated search unavailable";
+    } else if (canSearchNow) {
+      main.textContent = "Ready to search";
     } else if (isExhausted) {
       main.textContent = "All attempts exhausted";
     } else {
@@ -3746,20 +3780,40 @@ function renderProviderRows(
 
       if (canToggleMangaDexChapterState(providerResult)) {
         meta.onclick = () => {
-          void toggleMangaDexPurgedState();
+          runPopupTask(
+            () => toggleMangaDexPurgedState(),
+            "Unable to update the MangaDex chapter state.",
+          );
         };
       }
     } else if (providerResult?.latestChapterNumber) {
       const latestLabel = `Ch. ${providerResult.latestChapterNumber.replace(/^page\.\s*/i, "")}`;
       meta.innerHTML = `${ENGLISH_FLAG_ICON}<span>${escapeHtml(latestLabel)}</span>`;
     } else if (providerResult) {
-      if (provider.key === "mangafire" || provider.key === "weebcentral") {
-        meta.textContent = "Cloudflare Error";
-      } else {
-        meta.textContent = "";
-      }
+      meta.textContent = "";
     } else if (!providerEnabled) {
       meta.textContent = "Disabled";
+    } else if (hasTransientOutcome && searchOutcome) {
+      switch (searchOutcome.kind) {
+        case "blocked":
+          meta.textContent = "Automated search blocked";
+          break;
+        case "rate_limited":
+          meta.textContent = "Provider rate limited";
+          break;
+        case "auth_required":
+          meta.textContent = "Provider sign-in required";
+          break;
+        case "unavailable":
+          meta.textContent = searchOutcome.reason === "timeout" ? "Provider timed out" : "Provider unavailable";
+          break;
+        case "error":
+          meta.textContent = "Provider response changed";
+          break;
+        default:
+          meta.textContent = "Automated search unavailable";
+          break;
+      }
     } else if (canSearchNow) {
       meta.textContent = "";
     } else if (titleCount > 0) {
@@ -3773,27 +3827,36 @@ function renderProviderRows(
     const actions = document.createElement("div");
     actions.className = "provider-actions";
     const isReadLinkSaveArmed = providerResult ? armedReadLinkSaves[provider.key] === providerResult.url : false;
+    const isReadLinkSaveBusy = readLinkSaveInProgress === provider.key;
 
     const copyButton = buildActionButton(
       isReadLinkSaveArmed ? "icon-button icon-button--save-read-link" : "icon-button",
       isReadLinkSaveArmed ? SAVE_READ_LINK_ICON : COPY_ICON,
       providerResult
-        ? isReadLinkSaveArmed
+        ? isReadLinkSaveBusy
+          ? `Saving ${providerLabel} as MangaBaka Read Link`
+          : isReadLinkSaveArmed
           ? `Save ${providerLabel} as MangaBaka Read Link`
           : `Copy ${providerLabel} link`
         : `${providerLabel} unavailable`,
-      !providerResult,
+      !providerResult || isReadLinkSaveBusy || readLinkSaveInProgress != null,
       () => {
-        if (!providerResult) {
+        if (!providerResult || readLinkSaveInProgress != null) {
           return;
         }
 
         if (isReadLinkSaveArmed) {
-          void saveReadLink(provider.key, providerResult.url, providerLabel);
+          runPopupTask(
+            () => saveReadLink(provider.key, providerResult.url, providerLabel),
+            `Unable to save the ${providerLabel} Read Link.`,
+          );
           return;
         }
 
-        void copyLink(provider.key, providerResult.url, providerLabel);
+        runPopupTask(
+          () => copyLink(provider.key, providerResult.url, providerLabel),
+          `Unable to copy the ${providerLabel} link.`,
+        );
       },
     );
 
@@ -3801,7 +3864,7 @@ function renderProviderRows(
       "icon-button",
       OPEN_ICON,
       providerResult
-        ? `Open ${providerLabel} in ${currentSettings.providerLinkType === "new" ? "a new tab" : "the current tab"}`
+        ? `Open ${providerLabel} in ${currentSettings.searchLinkType === "new" ? "a new tab" : "the current tab"}`
         : `${providerLabel} unavailable`,
       !providerResult,
       () => {
@@ -3809,7 +3872,10 @@ function renderProviderRows(
           return;
         }
 
-        void openProviderUrl(providerResult.url, providerLabel);
+        runPopupTask(
+          () => openProviderUrl(providerResult.url, providerLabel),
+          `Unable to open ${providerLabel}.`,
+        );
       },
     );
 
@@ -3823,7 +3889,10 @@ function renderProviderRows(
           return;
         }
 
-        void handleProviderRetry(provider.key);
+        runPopupTask(
+          () => handleProviderRetry(provider.key),
+          `Unable to retry ${providerLabel}.`,
+        );
       },
     );
 
@@ -3837,7 +3906,25 @@ function renderProviderRows(
           return;
         }
 
-        void handleProviderSearchNow(provider.key);
+        runPopupTask(
+          () => handleProviderSearchNow(provider.key),
+          `Unable to search ${providerLabel}.`,
+        );
+      },
+    );
+
+    const manualSearchButton = buildTextActionButton(
+      "action-button action-button--search",
+      "Open Search",
+      `Open ${providerLabel} manual search`,
+      !manualSearchUrl,
+      () => {
+        if (manualSearchUrl) {
+          runPopupTask(
+            () => openProviderUrl(manualSearchUrl, `${providerLabel} search`),
+            `Unable to open the ${providerLabel} search.`,
+          );
+        }
       },
     );
 
@@ -3867,12 +3954,21 @@ function renderProviderRows(
           return;
         }
 
-        void handleProviderRefresh(provider.key);
+        runPopupTask(
+          () => handleProviderRefresh(provider.key),
+          `Unable to refresh ${providerLabel}.`,
+        );
       },
     );
 
     if (providerResult) {
-      actions.append(copyButton, openButton, shouldShowRefreshButton ? refreshButton : incorrectButton);
+      actions.append(
+        copyButton,
+        openButton,
+        manualSearchUrl ? manualSearchButton : shouldShowRefreshButton ? refreshButton : incorrectButton,
+      );
+    } else if (manualSearchUrl) {
+      actions.append(manualSearchButton);
     } else if (canSearchNow) {
       actions.append(searchNowButton);
     } else if (providerEnabled && providerSearched) {
@@ -3950,8 +4046,32 @@ function getProviderLabelMarkup(providerKey: ProviderKey, label: string): string
   }
 }
 
+function buildProviderLabel(providerKey: ProviderKey, label: string): HTMLAnchorElement {
+  const adapter = getProviderAdapter(providerKey);
+  if (!adapter) {
+    throw new Error(`Missing provider adapter for ${providerKey}`);
+  }
+  const homepageUrl = adapter.homepageUrl;
+  const link = document.createElement("a");
+  link.className = `provider-label provider-label--${currentSettings.providerLabelMode} provider-label--link`;
+  link.href = homepageUrl;
+  link.target = currentSettings.providerLinkType === "new" ? "_blank" : "_self";
+  link.rel = "noopener noreferrer";
+  link.title = `Open ${label} homepage in ${currentSettings.providerLinkType === "new" ? "a new tab" : "the current tab"}`;
+  link.setAttribute("aria-label", link.title);
+  link.innerHTML = getProviderLabelMarkup(providerKey, label);
+  link.addEventListener("click", (event) => {
+    event.preventDefault();
+    runPopupTask(
+      () => openProviderHomepage(providerKey, label),
+      `Unable to open ${label}.`,
+    );
+  });
+  return link;
+}
+
 function getProviderIconPath(providerKey: ProviderKey): string {
-  const filename = providerKey === "exhentai" ? "ehentai" : providerKey;
+  const filename = __ADULT_PROVIDERS_ENABLED__ && providerKey === "exhentai" ? "ehentai" : providerKey;
   return chrome.runtime.getURL(`assets/providers/${filename}.${PROVIDER_ICON_EXTENSIONS[providerKey]}`);
 }
 
@@ -3997,7 +4117,7 @@ async function rerenderCurrentView(): Promise<void> {
       return;
     case "provider":
       if (currentProviderPage && currentSettings.enabledProviders[currentProviderPage.providerKey]) {
-        renderProviderPageState(currentProviderPage);
+        await renderProviderPageState(currentProviderPage);
       } else {
         await renderUnsupportedState();
       }
@@ -4010,7 +4130,19 @@ async function rerenderCurrentView(): Promise<void> {
 
 async function openProviderUrl(url: string, providerLabel: string): Promise<void> {
   try {
-    await openUrlWithPreference(url, currentSettings.providerLinkType);
+    await openUrlWithPreference(url, currentSettings.searchLinkType);
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : `Unable to open ${providerLabel}`, "error");
+  }
+}
+
+async function openProviderHomepage(providerKey: ProviderKey, providerLabel: string): Promise<void> {
+  try {
+    const homepageUrl = getProviderAdapter(providerKey)?.homepageUrl;
+    if (!homepageUrl) {
+      throw new Error(`${providerLabel} homepage is unavailable.`);
+    }
+    await openUrlWithPreference(homepageUrl, currentSettings.providerLinkType);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : `Unable to open ${providerLabel}`, "error");
   }
@@ -4018,7 +4150,7 @@ async function openProviderUrl(url: string, providerLabel: string): Promise<void
 
 async function openMangaBakaSearch(title: string): Promise<void> {
   try {
-    await openUrlWithPreference(buildMangaBakaSearchUrl(title), currentSettings.providerLinkType);
+    await openUrlWithPreference(buildMangaBakaSearchUrl(title), currentSettings.searchLinkType);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : "Unable to search MangaBaka", "error");
   }
@@ -4103,16 +4235,27 @@ async function handleProviderRefresh(providerKey: ProviderKey): Promise<void> {
   if (providerKey === "atsu") {
     const mangaId = getAtsumaruMangaIdFromUrl(currentResult.url);
     if (mangaId) {
-      latestChapterNumber = await fetchAtsumaruLatestChapterNumber(mangaId);
+      const latestChapterOutcome = await fetchAtsumaruLatestChapterNumber(mangaId);
+      if (latestChapterOutcome.kind !== "found") {
+        currentProviderSearchOutcomes.atsu = retypeProviderOutcome(latestChapterOutcome);
+        showProviderSearchOutcome(providerLabel, retypeProviderOutcome(latestChapterOutcome));
+        return;
+      }
+      latestChapterNumber = latestChapterOutcome.value;
       latestChapterLanguage = "en";
     }
   } else if (providerKey === "mangadex") {
     const mangaId = getMangaDexMangaIdFromUrl(currentResult.url);
     if (mangaId) {
-      const latestEnglishChapterInfo = await fetchMangaDexLatestEnglishChapterInfo(mangaId);
-      latestChapterNumber = latestEnglishChapterInfo.latestChapterNumber;
-      latestChapterLanguage = latestEnglishChapterInfo.latestChapterLanguage;
-      mangaDexChapterState = latestEnglishChapterInfo.mangaDexChapterState ?? null;
+      const latestEnglishChapterOutcome = await fetchMangaDexLatestEnglishChapterInfo(mangaId);
+      if (latestEnglishChapterOutcome.kind !== "found") {
+        currentProviderSearchOutcomes.mangadex = retypeProviderOutcome(latestEnglishChapterOutcome);
+        setStatus(latestEnglishChapterOutcome.message ?? "MangaDex chapter status is unavailable", "error");
+        return;
+      }
+      latestChapterNumber = latestEnglishChapterOutcome.value.latestChapterNumber;
+      latestChapterLanguage = latestEnglishChapterOutcome.value.latestChapterLanguage;
+      mangaDexChapterState = latestEnglishChapterOutcome.value.mangaDexChapterState ?? null;
     }
   }
 
@@ -4160,7 +4303,12 @@ async function handleProviderRefresh(providerKey: ProviderKey): Promise<void> {
 }
 
 async function copyLink(providerKey: ProviderKey, url: string, providerLabel: string): Promise<void> {
-  await navigator.clipboard.writeText(url);
+  try {
+    await navigator.clipboard.writeText(url);
+  } catch {
+    setStatus(`Unable to copy ${providerLabel} link`, "error");
+    return;
+  }
   armedReadLinkSaves = { [providerKey]: url };
   rerenderCurrentResultsOnly();
   setStatus(`${providerLabel} link copied`, "success");
@@ -4232,501 +4380,27 @@ async function toggleMangaDexPurgedState(): Promise<void> {
 }
 
 async function saveReadLink(providerKey: ProviderKey, url: string, providerLabel: string): Promise<void> {
-  const tabId = await resolveUsableTabId();
-  if (tabId == null) {
-    setStatus("No active MangaBaka tab available", "error");
+  if (readLinkSaveInProgress != null) {
     return;
   }
 
+  readLinkSaveInProgress = providerKey;
+  rerenderCurrentResultsOnly();
   setStatus(`Saving ${providerLabel} as Read Link...`, "loading");
-
   try {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId },
-      args: [url],
-      func: async (readLinkUrl: string) => {
-        const sleep = (ms: number): Promise<void> =>
-          new Promise((resolve) => {
-            window.setTimeout(resolve, ms);
-          });
+    const tabId = await resolveUsableTabId();
+    const seriesLocation = parseMangaBakaSeriesUrl(currentSourceUrl);
+    if (tabId == null || !seriesLocation) {
+      setStatus("No active MangaBaka series tab available", "error");
+      return;
+    }
 
-        const isVisible = (element: Element | null): element is HTMLElement => {
-          if (!(element instanceof HTMLElement)) {
-            return false;
-          }
-
-          const style = window.getComputedStyle(element);
-          const rect = element.getBoundingClientRect();
-          return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
-        };
-
-        const getElementText = (element: Element | null): string =>
-          element?.textContent?.replace(/\s+/g, " ").trim().toLowerCase() ?? "";
-
-        const normalizeFieldText = (value: string): string =>
-          value
-            .toLowerCase()
-            .replace(/[^a-z0-9]+/g, " ")
-            .trim();
-
-        const getElementIdentity = (element: Element | null): string => {
-          if (!(element instanceof HTMLElement)) {
-            return "";
-          }
-
-          return [
-            getElementText(element),
-            element.getAttribute("aria-label") ?? "",
-            element.getAttribute("title") ?? "",
-            element.getAttribute("data-slot") ?? "",
-            element.getAttribute("data-state") ?? "",
-            element.className,
-          ]
-            .join(" ")
-            .toLowerCase();
-        };
-
-        const SERIES_EDITOR_TRIGGER_SELECTOR =
-          "button[data-dialog-trigger][data-slot='sheet-trigger'][aria-haspopup='dialog'], [data-dialog-trigger][data-slot='sheet-trigger'][aria-haspopup='dialog']";
-
-        const findLibrarySection = (): HTMLElement | null => {
-          const heading = Array.from(document.querySelectorAll("h2, h3, h4, h5, div, span, p"))
-            .find((element) => isVisible(element) && getElementText(element) === "my library");
-
-          if (!(heading instanceof HTMLElement)) {
-            return null;
-          }
-
-          return (
-            heading.closest("article, section, [class*='card'], [class*='group']") ??
-            heading.parentElement ??
-            heading.closest("div") ??
-            null
-          );
-        };
-
-        const findAddToLibraryButton = (): HTMLElement | null =>
-          Array.from(document.querySelectorAll("button, a, a[role='button'], [data-slot='button']"))
-            .filter((element): element is HTMLElement => isVisible(element))
-            .find((element) => {
-              const text = getElementText(element);
-              return (
-                text === "add series to my library" ||
-                text === "add to my library" ||
-                text.includes("add series to my library")
-              );
-            }) ?? null;
-
-        const getSeriesEditorContextText = (element: HTMLElement): string => {
-          const containers = [
-            element.closest("article"),
-            element.closest("section"),
-            element.closest("[class*='card']"),
-            element.closest("[class*='group']"),
-            element.parentElement,
-            element.parentElement?.parentElement,
-          ].filter((container): container is HTMLElement => Boolean(container));
-
-          return containers
-            .map((container) => normalizeFieldText(container.textContent ?? ""))
-            .find((text) => text.length > 0) ?? "";
-        };
-
-        const scoreSeriesEditorTrigger = (element: HTMLElement, librarySection: HTMLElement | null): number => {
-          const identity = getElementIdentity(element);
-          const context = getSeriesEditorContextText(element);
-          let score = 0;
-
-          const sameSection = Boolean(librarySection && librarySection.contains(element));
-
-          if (identity.includes("add series to my library") || identity.includes("add to my library")) {
-            return -1000;
-          }
-          if (identity.includes("report") || context.includes("report an issue")) {
-            return -1000;
-          }
-          if (identity.includes("edit series") && !context.includes("my library")) {
-            return -1000;
-          }
-
-          score += 40;
-          if (sameSection) {
-            score += 120;
-          }
-          if (context.includes("my library")) {
-            score += 180;
-          }
-          if (element.matches(SERIES_EDITOR_TRIGGER_SELECTOR)) {
-            score += 120;
-          }
-          if (identity.includes("edit series") || identity.includes("update series")) {
-            score += 60;
-          }
-          if (identity.includes("edit")) {
-            score += 25;
-          }
-          if (identity.includes("update")) {
-            score += 20;
-          }
-          if (identity.includes("library")) {
-            score += 15;
-          }
-          if (identity.includes("entry")) {
-            score += 15;
-          }
-          if (identity.includes("remove") || identity.includes("delete")) {
-            score -= 100;
-          }
-          if (identity.includes("lucide-pencil") || element.innerHTML.toLowerCase().includes("lucide-pencil")) {
-            score += 60;
-          }
-          if (element.id.startsWith("bits-")) {
-            score += 10;
-          }
-          if (identity.includes("bg-secondary") || identity.includes("text-secondary-foreground")) {
-            score += 10;
-          }
-          if (identity.includes("list") || identity.includes("rating") || identity.includes("note")) {
-            score -= 25;
-          }
-          if (element.getAttribute("aria-haspopup") === "dialog") {
-            score += 10;
-          }
-          if (element.querySelector("svg")) {
-            score += 5;
-          }
-          if (!getElementText(element)) {
-            score += 5;
-          }
-          if (element instanceof HTMLAnchorElement && element.href && !element.href.startsWith(window.location.origin)) {
-            score -= 50;
-          }
-
-          return score;
-        };
-
-        const activateElement = async (element: HTMLElement): Promise<void> => {
-          element.focus();
-
-          const pointerDown = new PointerEvent("pointerdown", {
-            bubbles: true,
-            cancelable: true,
-            composed: true,
-            pointerId: 1,
-            pointerType: "mouse",
-            isPrimary: true,
-            button: 0,
-            buttons: 1,
-          });
-          const mouseDown = new MouseEvent("mousedown", {
-            bubbles: true,
-            cancelable: true,
-            composed: true,
-            button: 0,
-            buttons: 1,
-          });
-          const pointerUp = new PointerEvent("pointerup", {
-            bubbles: true,
-            cancelable: true,
-            composed: true,
-            pointerId: 1,
-            pointerType: "mouse",
-            isPrimary: true,
-            button: 0,
-            buttons: 0,
-          });
-          const mouseUp = new MouseEvent("mouseup", {
-            bubbles: true,
-            cancelable: true,
-            composed: true,
-            button: 0,
-            buttons: 0,
-          });
-          const click = new MouseEvent("click", {
-            bubbles: true,
-            cancelable: true,
-            composed: true,
-            button: 0,
-            buttons: 0,
-          });
-
-          element.dispatchEvent(pointerDown);
-          element.dispatchEvent(mouseDown);
-          element.dispatchEvent(pointerUp);
-          element.dispatchEvent(mouseUp);
-          if (element instanceof HTMLButtonElement || element instanceof HTMLAnchorElement) {
-            element.click();
-          } else {
-            element.dispatchEvent(click);
-          }
-          await sleep(125);
-          if (element.getAttribute("aria-haspopup") === "dialog" && element.getAttribute("aria-expanded") !== "true") {
-            const enterDown = new KeyboardEvent("keydown", {
-              key: "Enter",
-              code: "Enter",
-              bubbles: true,
-              cancelable: true,
-              composed: true,
-            });
-            const enterUp = new KeyboardEvent("keyup", {
-              key: "Enter",
-              code: "Enter",
-              bubbles: true,
-              cancelable: true,
-              composed: true,
-            });
-            const spaceDown = new KeyboardEvent("keydown", {
-              key: " ",
-              code: "Space",
-              bubbles: true,
-              cancelable: true,
-              composed: true,
-            });
-            const spaceUp = new KeyboardEvent("keyup", {
-              key: " ",
-              code: "Space",
-              bubbles: true,
-              cancelable: true,
-              composed: true,
-            });
-
-            element.dispatchEvent(enterDown);
-            element.dispatchEvent(enterUp);
-            await sleep(125);
-            if (element.getAttribute("aria-expanded") !== "true") {
-              element.dispatchEvent(spaceDown);
-              element.dispatchEvent(spaceUp);
-            }
-          }
-          await sleep(50);
-        };
-
-        const getVisibleInputs = (root: Document | Element): Array<HTMLInputElement | HTMLTextAreaElement> =>
-          Array.from(root.querySelectorAll("input, textarea")).filter(
-            (element): element is HTMLInputElement | HTMLTextAreaElement => isVisible(element),
-          );
-
-        const getAllInputs = (root: Document | Element): Array<HTMLInputElement | HTMLTextAreaElement> =>
-          Array.from(root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea"));
-
-        const getFieldIdentity = (input: HTMLInputElement | HTMLTextAreaElement): string =>
-          normalizeFieldText(
-            `${input.name} ${input.id} ${input.placeholder} ${input.getAttribute("aria-label") ?? ""} ${input.type}`,
-          );
-
-        const pickBestReadLinkInput = (
-          inputs: Array<HTMLInputElement | HTMLTextAreaElement>,
-        ): HTMLInputElement | HTMLTextAreaElement | null => {
-          const exactNameMatch = inputs.find((input) => {
-            const identity = getFieldIdentity(input);
-            return identity.includes("read link") || identity.includes("read_link");
-          });
-          if (exactNameMatch) {
-            return exactNameMatch;
-          }
-
-          const directMatch = inputs.find((input) => {
-            const identity = getFieldIdentity(input);
-            return identity.includes("read") && identity.includes("link");
-          });
-          if (directMatch) {
-            return directMatch;
-          }
-
-          return inputs.length === 1 ? inputs[0] : null;
-        };
-
-        const findReadLinkInput = (allowHidden = false): HTMLInputElement | HTMLTextAreaElement | null => {
-          const selectorMatch = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(
-            "input[name='read_link'], textarea[name='read_link'], input[name*='read_link' i], textarea[name*='read_link' i], input[id*='read_link' i], textarea[id*='read_link' i]",
-          );
-          if (selectorMatch && (allowHidden || isVisible(selectorMatch))) {
-            return selectorMatch;
-          }
-
-          const directMatch = pickBestReadLinkInput(allowHidden ? getAllInputs(document) : getVisibleInputs(document));
-          if (directMatch) {
-            return directMatch;
-          }
-
-          const labelCandidates = Array.from(document.querySelectorAll("label, div, span, p, h3, h4, h5"))
-            .filter((element) => (allowHidden || isVisible(element)) && normalizeFieldText(getElementText(element)) === "read link");
-
-          for (const label of labelCandidates) {
-            if (label instanceof HTMLLabelElement && label.htmlFor) {
-              const labeledInput = document.getElementById(label.htmlFor);
-              if (labeledInput instanceof HTMLInputElement || labeledInput instanceof HTMLTextAreaElement) {
-                return labeledInput;
-              }
-            }
-
-            const candidateRoots = [
-              label.parentElement,
-              label.nextElementSibling,
-              label.closest("form"),
-              label.closest("aside"),
-              label.closest("[role='dialog']"),
-              label.closest("[data-slot='sheet-content']"),
-              label.closest("[data-slot='drawer-content']"),
-            ].filter((root): root is Element => Boolean(root));
-
-            for (const root of candidateRoots) {
-              const nestedInput = pickBestReadLinkInput(allowHidden ? getAllInputs(root) : getVisibleInputs(root));
-              if (nestedInput) {
-                return nestedInput;
-              }
-            }
-          }
-
-          return null;
-        };
-
-        const setInputValue = (input: HTMLInputElement | HTMLTextAreaElement, value: string): void => {
-          input.focus();
-          input.click();
-          const prototype = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-          const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
-          descriptor?.set?.call(input, value);
-          input.value = value;
-          input.setAttribute("value", value);
-          if ("setSelectionRange" in input) {
-            input.setSelectionRange(value.length, value.length);
-          }
-          input.dispatchEvent(new Event("input", { bubbles: true }));
-          input.dispatchEvent(new Event("change", { bubbles: true }));
-          input.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
-        };
-
-        const findSaveButton = (input: HTMLInputElement | HTMLTextAreaElement, opener?: HTMLElement | null): HTMLElement | null => {
-          const scopedContainers = [
-            input.closest("form"),
-            input.closest("[role='dialog']"),
-            input.closest("aside"),
-            input.closest("[data-slot='sheet-content']"),
-            input.closest("[data-slot='drawer-content']"),
-            document.body,
-          ].filter((container): container is HTMLElement => Boolean(container));
-
-          for (const container of scopedContainers) {
-            const buttons = Array.from(container.querySelectorAll("button, [data-slot='button']"))
-              .filter((element): element is HTMLElement => isVisible(element));
-            const submitButton = buttons.find((button) => {
-              if (button === opener) {
-                return false;
-              }
-
-              return button instanceof HTMLButtonElement && button.type === "submit";
-            });
-            if (submitButton) {
-              return submitButton;
-            }
-
-            const exactMatch = buttons.find((button) => button !== opener && getElementText(button) === "update series");
-            if (exactMatch) {
-              return exactMatch;
-            }
-
-            const partialMatch = buttons.find(
-              (button) => button !== opener && (getElementText(button).includes("update series") || getElementText(button) === "save"),
-            );
-            if (partialMatch) {
-              return partialMatch;
-            }
-          }
-
-          return null;
-        };
-
-        const openSeriesEditor = async (): Promise<HTMLElement | null> => {
-          const librarySection = findLibrarySection();
-          const directTriggers = Array.from(document.querySelectorAll<HTMLElement>(SERIES_EDITOR_TRIGGER_SELECTOR))
-            .filter((element) => isVisible(element))
-            .map((button) => ({
-              button,
-              score: scoreSeriesEditorTrigger(button, librarySection),
-            }))
-            .filter((candidate) => candidate.score > -1000)
-            .sort((left, right) => right.score - left.score);
-
-          for (const candidate of directTriggers) {
-            await activateElement(candidate.button);
-            for (let attempt = 0; attempt < 32; attempt += 1) {
-              await sleep(125);
-              if (findReadLinkInput()) {
-                return candidate.button;
-              }
-              if (candidate.button.getAttribute("aria-expanded") === "true" && attempt >= 8) {
-                const hiddenInput = findReadLinkInput(true);
-                if (hiddenInput) {
-                  return candidate.button;
-                }
-              }
-            }
-          }
-
-          return null;
-        };
-
-        let input: HTMLInputElement | HTMLTextAreaElement | null;
-        let opener: HTMLElement | null = null;
-        input = findReadLinkInput();
-        if (!input) {
-          if (findAddToLibraryButton()) {
-            return { ok: false, error: "You must add the series to your MangaBaka library before saving a Read Link." };
-          }
-
-          input = findReadLinkInput(true);
-          if (input) {
-            opener = null;
-          } else {
-            opener = await openSeriesEditor();
-            if (!opener) {
-              return { ok: false, error: "Could not open the MangaBaka library editor." };
-            }
-          }
-        }
-
-        for (let attempt = 0; attempt < 20; attempt += 1) {
-          await sleep(150);
-          input = findReadLinkInput() ?? findReadLinkInput(true);
-          if (input) {
-            break;
-          }
-        }
-
-        if (!input) {
-          return { ok: false, error: "Could not find the Read Link field after opening Update series." };
-        }
-
-        setInputValue(input, readLinkUrl);
-        if (input.value !== readLinkUrl) {
-          setInputValue(input, readLinkUrl);
-        }
-
-        const saveButton = findSaveButton(input, opener);
-        const form = input.form ?? input.closest("form");
-
-        if (form instanceof HTMLFormElement && typeof form.requestSubmit === "function") {
-          if (saveButton instanceof HTMLButtonElement || saveButton instanceof HTMLInputElement) {
-            form.requestSubmit(saveButton);
-          } else {
-            form.requestSubmit();
-          }
-        } else if (saveButton) {
-          saveButton.click();
-        } else {
-          return { ok: false, error: "Could not submit the MangaBaka Read Link form." };
-        }
-
-        await sleep(700);
-
-        return { ok: true };
-      },
-    });
-
-    const result = results?.[0]?.result as { ok: boolean; error?: string } | undefined;
-    if (!result?.ok) {
-      setStatus(result?.error ?? "Unable to save MangaBaka Read Link.", "error");
+    if (!currentPageContextClient || currentPageContextClient.isDisconnected()) {
+      currentPageContextClient = await PageContextClient.connect(tabId);
+    }
+    const result = await currentPageContextClient.setReadLink(seriesLocation.seriesId, url);
+    if (!result.ok) {
+      setStatus("error" in result ? result.error.message : "Unable to save MangaBaka Read Link.", "error");
       return;
     }
 
@@ -4739,8 +4413,10 @@ async function saveReadLink(providerKey: ProviderKey, url: string, providerLabel
       setStatus("The active MangaBaka tab is no longer available.", "error");
       return;
     }
-
     setStatus(error instanceof Error ? error.message : "Unable to save MangaBaka Read Link", "error");
+  } finally {
+    readLinkSaveInProgress = null;
+    rerenderCurrentResultsOnly();
   }
 }
 
@@ -4751,6 +4427,8 @@ function sleep(ms: number): Promise<void> {
 }
 
 function wireTopResetButton(seriesId: string): void {
+  getResetButton().title = "Reset cached search";
+  getResetButton().setAttribute("aria-label", "Reset cached search");
   getResetButton().onclick = () => {
     requestInlineConfirmation(
       getResetButton(),
@@ -4761,8 +4439,83 @@ function wireTopResetButton(seriesId: string): void {
   };
 }
 
+function wireLookupRetryButton(seriesId: string): void {
+  setResetEnabled(true);
+  getResetButton().title = "Retry MangaBaka metadata lookup";
+  getResetButton().setAttribute("aria-label", "Retry MangaBaka metadata lookup");
+  getResetButton().onclick = () => {
+    runPopupTask(
+      () => runLookup(
+        currentSourceUrl,
+        seriesId,
+        createEmptyRejectedProviderUrls(),
+        { ...EMPTY_TITLE_ATTEMPT_INDEXES },
+      ),
+      "Unable to retry the MangaBaka lookup.",
+    );
+  };
+}
+
+function wireCachedMetadataRetryButton(seriesId: string): void {
+  setResetEnabled(true);
+  getResetButton().title = "Retry MangaBaka metadata refresh";
+  getResetButton().setAttribute("aria-label", "Retry MangaBaka metadata refresh");
+  getResetButton().onclick = () => {
+    runPopupTask(
+      () => retryCachedMetadataRefresh(seriesId),
+      "Unable to refresh the cached MangaBaka metadata.",
+    );
+  };
+}
+
+async function retryCachedMetadataRefresh(seriesId: string): Promise<void> {
+  const cachedLookup = currentCache;
+  if (!cachedLookup) {
+    return;
+  }
+
+  const retryPresentation = getPopupStatusPresentation({ kind: "retry" });
+  setStatus(retryPresentation.message, retryPresentation.tone);
+  try {
+    const refreshedMetadata = await fetchMangaBakaMetadata(currentSourceUrl, seriesId);
+    if (shouldInvalidateProviderResults(cachedLookup.series, refreshedMetadata.apiSeries.titles)) {
+      await persistMetadataOnlyInvalidation(refreshedMetadata);
+      await runLookup(
+        refreshedMetadata.sourceUrl,
+        seriesId,
+        createEmptyRejectedProviderUrls(),
+        { ...EMPTY_TITLE_ATTEMPT_INDEXES },
+        refreshedMetadata,
+      );
+      return;
+    }
+
+    const refreshedCache: CachedLookup = {
+      ...cachedLookup,
+      series: createCachedSeries(refreshedMetadata),
+    };
+    await saveCache(refreshedCache);
+    currentCache = refreshedCache;
+    renderLookup(refreshedCache, true);
+    setStatus("MangaBaka metadata refreshed; cached provider results retained", "success");
+    wireTopResetButton(seriesId);
+  } catch (error) {
+    if (error instanceof InvalidMangaBakaPageError) {
+      await clearCache(seriesId);
+      currentCache = null;
+      await renderInvalidPageState();
+      return;
+    }
+
+    renderLookup(cachedLookup, true);
+    setStatus("Loaded cached API metadata; MangaBaka refresh failed. Retry is available.", "error");
+    wireCachedMetadataRetryButton(seriesId);
+  }
+}
+
 async function handleTopReset(seriesId: string): Promise<void> {
-  setStatus("Clearing cached search...", "loading");
+  const resetPresentation = getPopupStatusPresentation({ kind: "reset" });
+  setStatus(resetPresentation.message, resetPresentation.tone);
   await clearCache(seriesId);
   currentCache = null;
   currentCachedResultFlags = {};
@@ -4791,24 +4544,43 @@ async function handleProviderReset(providerKey: ProviderKey): Promise<void> {
     rejectedUrls[providerKey].push(currentResult.url);
   }
 
-  const metadata: MangaBakaMetadata = {
-    seriesId: currentCache.seriesId,
-    sourceUrl: currentCache.sourceUrl,
-    primaryTitle: currentCache.primaryTitle,
-    titles: [...currentCache.titles],
-    authors: [...currentCache.authors],
-  };
+  const metadata = createMetadataFromCache(currentCache);
 
   setStatus(`Searching for another ${providerLabel} result...`, "loading");
   try {
+    const cacheBeforeAttempt = currentCache;
     const titleAttemptIndexes = { ...currentCache.titleAttemptIndexes };
-    const replacement = await searchProvider(providerKey, metadata, rejectedUrls, titleAttemptIndexes);
+    const attemptedTitleCursor = titleAttemptIndexes[providerKey] ?? 0;
+    const outcome = await searchProviderOutcome(providerKey, metadata, rejectedUrls, titleAttemptIndexes);
+    currentProviderSearchOutcomes[providerKey] = outcome;
+    const transition = transitionProviderSearch(
+      {
+        result: currentResult,
+        searched: currentCache.searchedProviders[providerKey],
+        titleCursor: currentCache.titleAttemptIndexes[providerKey] ?? 0,
+      },
+      attemptedTitleCursor,
+      outcome,
+    );
+    if (!transition.commit) {
+      renderLookup(cacheBeforeAttempt, true);
+      showProviderSearchOutcome(providerLabel, outcome);
+      return;
+    }
     const updatedCache: CachedLookup = {
       ...currentCache,
       rejectedUrls,
+      titleAttemptIndexes: {
+        ...currentCache.titleAttemptIndexes,
+        [providerKey]: transition.titleCursor,
+      },
+      searchedProviders: {
+        ...currentCache.searchedProviders,
+        [providerKey]: transition.searched,
+      },
       results: {
         ...currentCache.results,
-        [providerKey]: replacement,
+        [providerKey]: transition.result,
       },
       searchedAt: new Date().toISOString(),
     };
@@ -4817,6 +4589,7 @@ async function handleProviderReset(providerKey: ProviderKey): Promise<void> {
     currentCachedResultFlags[providerKey] = false;
     currentCache = updatedCache;
     renderLookup(updatedCache, false);
+    showProviderSearchOutcome(providerLabel, outcome);
   } catch (error) {
     currentCache = {
       ...currentCache,
@@ -4837,14 +4610,8 @@ async function handleProviderRetry(providerKey: ProviderKey): Promise<void> {
   }
 
   const providerLabel = getProviderDisplayLabel(providerKey);
-  const metadata: MangaBakaMetadata = {
-    seriesId: currentCache.seriesId,
-    sourceUrl: currentCache.sourceUrl,
-    primaryTitle: currentCache.primaryTitle,
-    titles: [...currentCache.titles],
-    authors: [...currentCache.authors],
-  };
-  const titleCount = currentCache.titles.length;
+  const metadata = createMetadataFromCache(currentCache);
+  const titleCount = currentCache.series.rankedSearchTitles.length;
   let nextTitleIndex = (currentCache.titleAttemptIndexes[providerKey] ?? 0) + 1;
   if (nextTitleIndex >= titleCount) {
     renderLookup(currentCache, true);
@@ -4856,16 +4623,39 @@ async function handleProviderRetry(providerKey: ProviderKey): Promise<void> {
 
   try {
     while (currentCache && nextTitleIndex < titleCount) {
+      const cacheBeforeAttempt = currentCache;
       const titleAttemptIndexes = { ...currentCache.titleAttemptIndexes, [providerKey]: nextTitleIndex };
       setStatus(`Trying ${providerLabel} title ${nextTitleIndex + 1} of ${titleCount}...`, "loading");
 
-      const replacement = await searchProvider(providerKey, metadata, currentCache.rejectedUrls, titleAttemptIndexes);
+      const outcome = await searchProviderOutcome(providerKey, metadata, currentCache.rejectedUrls, titleAttemptIndexes);
+      currentProviderSearchOutcomes[providerKey] = outcome;
+      const transition = transitionProviderSearch(
+        {
+          result: currentCache.results[providerKey],
+          searched: currentCache.searchedProviders[providerKey],
+          titleCursor: currentCache.titleAttemptIndexes[providerKey] ?? 0,
+        },
+        nextTitleIndex,
+        outcome,
+      );
+      if (!transition.commit) {
+        renderLookup(cacheBeforeAttempt, true);
+        showProviderSearchOutcome(providerLabel, outcome);
+        return;
+      }
       const updatedCache: CachedLookup = {
         ...currentCache,
-        titleAttemptIndexes,
+        titleAttemptIndexes: {
+          ...currentCache.titleAttemptIndexes,
+          [providerKey]: transition.titleCursor,
+        },
+        searchedProviders: {
+          ...currentCache.searchedProviders,
+          [providerKey]: transition.searched,
+        },
         results: {
           ...currentCache.results,
-          [providerKey]: replacement,
+          [providerKey]: transition.result,
         },
         searchedAt: new Date().toISOString(),
       };
@@ -4875,12 +4665,12 @@ async function handleProviderRetry(providerKey: ProviderKey): Promise<void> {
       currentCache = updatedCache;
       rerenderCurrentResultsOnly();
 
-      if (replacement) {
-        setStatus("Search complete", "success");
+      if (outcome.kind === "found") {
+        showProviderSearchOutcome(providerLabel, outcome);
         return;
       }
 
-      nextTitleIndex += 1;
+      nextTitleIndex = transition.titleCursor + 1;
       if (nextTitleIndex >= titleCount) {
         setStatus(`All ${providerLabel} title attempts exhausted`, "error");
         return;
@@ -4909,27 +4699,47 @@ async function handleProviderSearchNow(providerKey: ProviderKey): Promise<void> 
   }
 
   const providerLabel = getProviderDisplayLabel(providerKey);
-  const metadata: MangaBakaMetadata = {
-    seriesId: currentCache.seriesId,
-    sourceUrl: currentCache.sourceUrl,
-    primaryTitle: currentCache.primaryTitle,
-    titles: [...currentCache.titles],
-    authors: [...currentCache.authors],
-  };
+  const metadata = createMetadataFromCache(currentCache);
 
   setStatus(`Searching ${providerLabel}...`, "loading");
 
   try {
-    const replacement = await searchProvider(providerKey, metadata, currentCache.rejectedUrls, currentCache.titleAttemptIndexes);
+    const cacheBeforeAttempt = currentCache;
+    const attemptedTitleCursor = currentCache.titleAttemptIndexes[providerKey] ?? 0;
+    const outcome = await searchProviderOutcome(
+      providerKey,
+      metadata,
+      currentCache.rejectedUrls,
+      currentCache.titleAttemptIndexes,
+    );
+    currentProviderSearchOutcomes[providerKey] = outcome;
+    const transition = transitionProviderSearch(
+      {
+        result: currentCache.results[providerKey],
+        searched: currentCache.searchedProviders[providerKey],
+        titleCursor: attemptedTitleCursor,
+      },
+      attemptedTitleCursor,
+      outcome,
+    );
+    if (!transition.commit) {
+      renderLookup(cacheBeforeAttempt, true);
+      showProviderSearchOutcome(providerLabel, outcome);
+      return;
+    }
     const updatedCache: CachedLookup = {
       ...currentCache,
+      titleAttemptIndexes: {
+        ...currentCache.titleAttemptIndexes,
+        [providerKey]: transition.titleCursor,
+      },
       searchedProviders: {
         ...currentCache.searchedProviders,
-        [providerKey]: true,
+        [providerKey]: transition.searched,
       },
       results: {
         ...currentCache.results,
-        [providerKey]: replacement,
+        [providerKey]: transition.result,
       },
       searchedAt: new Date().toISOString(),
     };
@@ -4938,6 +4748,7 @@ async function handleProviderSearchNow(providerKey: ProviderKey): Promise<void> 
     currentCachedResultFlags[providerKey] = false;
     currentCache = updatedCache;
     renderLookup(updatedCache, false);
+    showProviderSearchOutcome(providerLabel, outcome);
   } catch (error) {
     renderLookup(currentCache, true);
     setStatus(error instanceof Error ? error.message : `Unable to search ${providerLabel}`, "error");
@@ -4962,7 +4773,7 @@ function requestMultiClickConfirmation(
     if (pendingConfirmation.messageIndex >= pendingConfirmation.messages.length - 1) {
       const confirmedAction = pendingConfirmation.action;
       clearPendingConfirmation();
-      void confirmedAction();
+      runPopupTask(confirmedAction, "Unable to complete the confirmed action.");
       return;
     }
 
@@ -5167,6 +4978,10 @@ function getProviderLabelModeSelect(): HTMLSelectElement {
 
 function getMangaBakaLinkTypeSelect(): HTMLSelectElement {
   return document.getElementById("option-mangabaka-link-type") as HTMLSelectElement;
+}
+
+function getSearchLinkTypeSelect(): HTMLSelectElement {
+  return document.getElementById("option-search-link-type") as HTMLSelectElement;
 }
 
 function getProviderLinkTypeSelect(): HTMLSelectElement {

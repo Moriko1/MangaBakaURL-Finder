@@ -1,13 +1,15 @@
 {
   "compilerOptions": {
     "target": "es2020",
-    "lib": ["dom", "es2020"],
-    "module": "commonjs",
+    "lib": ["dom", "dom.iterable", "es2020"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "strict": true,
     "skipLibCheck": true,
-    "outDir": "dist"
+    "noEmit": true,
+    "types": ["chrome", "vitest/globals"]
   },
-  "include": ["src"]
+  "include": ["src/**/*.ts", "tests/**/*.ts", "playwright.config.ts", "vitest.config.mts"]
 }

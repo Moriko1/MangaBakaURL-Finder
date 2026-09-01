@@ -304,6 +304,26 @@ h1.title--inactive {
   min-width: 0;
 }
 
+.provider-label--link {
+  border-radius: 6px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.provider-label--link:visited {
+  color: var(--accent-strong);
+}
+
+.provider-label--link:hover .provider-label-text {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.provider-label--link:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 3px;
+}
+
 /*noinspection CssUnusedSymbol*/
 .provider-label--titles {
   align-items: center;

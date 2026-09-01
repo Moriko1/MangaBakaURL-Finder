@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "MangaBaka URL Finder",
-  "version": "1.5.2",
-  "description": "Find matching Atsumaru and MangaDex (and more) URLs for MangaBaka.",
+  "version": "1.6.4",
+  "description": "Find matching provider URLs for MangaBaka and search MangaBaka from supported provider pages.",
   "permissions": ["storage", "tabs", "scripting", "alarms"],
   "host_permissions": [
     "https://api.github.com/*",
+    "https://api.mangabaka.org/*",
     "https://mangabaka.org/*",
     "https://mangadex.org/*",
     "https://atsu.moe/*",
@@ -13,12 +14,18 @@
     "https://weebcentral.com/*",
     "https://api.mangadex.org/*",
     "https://e-hentai.org/*",
-    "https://exhentai.org/*",
-    "https://search.yahoo.com/*"
+    "https://exhentai.org/*"
   ],
   "background": {
     "service_worker": "dist/background.js"
   },
+  "content_scripts": [
+    {
+      "matches": ["https://mangabaka.org/*"],
+      "js": ["dist/content.js"],
+      "run_at": "document_start"
+    }
+  ],
   "icons": {
     "16": "assets/icon-color-16.png",
     "32": "assets/icon-color-32.png",
@@ -34,20 +41,5 @@
     },
     "default_popup": "popup.html",
     "default_title": "MangaBaka URL Finder"
-  },
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "assets/icon-color-16.png",
-        "assets/icon-color-32.png",
-        "assets/icon-color-48.png",
-        "assets/icon-color-128.png",
-        "assets/icon-gray-16.png",
-        "assets/icon-gray-32.png",
-        "assets/icon-gray-48.png",
-        "assets/icon-gray-128.png"
-      ],
-      "matches": ["<all_urls>"]
-    }
-  ]
+  }
 }

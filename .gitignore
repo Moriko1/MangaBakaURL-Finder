@@ -29,7 +29,9 @@
 /tmp_*.txt
 /tmp
 /out-tsc
+/playwright-report
 /src/build-info.ts
+/test-results
 
 /node_modules
 npm-debug.log*

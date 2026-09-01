@@ -87,12 +87,12 @@
               <option value="stacked">Titles + Icons</option>
             </select>
           </label>
-          <hr class="option-separator" />
-          <label class="option-row">
+          <hr class="option-separator" data-variant-scope="adult-provider" />
+          <label class="option-row" data-variant-scope="adult-provider">
             <span>E-Hentai</span>
             <input id="option-ehentai" type="checkbox" />
           </label>
-          <label class="option-row">
+          <label class="option-row" data-variant-scope="adult-provider">
             <span>ExHentai</span>
             <input id="option-exhentai" type="checkbox" />
           </label>
@@ -116,6 +116,13 @@
             <select id="option-mangabaka-link-type">
               <option value="current">Current Tab</option>
               <option value="new">New Tab</option>
+            </select>
+          </label>
+          <label class="option-row">
+            <span>Search-Link Type</span>
+            <select id="option-search-link-type">
+              <option value="current">Current Tab</option>
+              <option value="new" selected>New Tab</option>
             </select>
           </label>
           <label class="option-row">
@@ -178,47 +185,6 @@
         <p id="status" data-tone="idle">Waiting...</p>
       </footer>
 
-      <template id="inspection-runtime-selectors">
-        <h1 class="title--inactive">Inactive</h1>
-        <section class="provider-row provider-row--loading">
-          <div class="provider-label provider-label--titles provider-label--icons provider-label--stacked">
-            <img
-              class="provider-label-logo"
-              src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
-              alt=""
-            />
-            <span class="provider-label-text">Provider</span>
-          </div>
-          <div class="provider-value provider-value--na">
-            <span class="provider-value-main">N/A</span>
-            <span class="provider-value-meta">
-              Meta
-              <img
-                class="provider-value-flag-icon"
-                src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
-                alt=""
-              />
-              <img
-                class="provider-value-status-icon"
-                src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
-                alt=""
-              />
-            </span>
-          </div>
-          <div class="provider-actions">
-            <button class="action-button action-button--search action-button--confirm" type="button">Search</button>
-            <button class="icon-button icon-button--retry icon-button--save-read-link icon-button--confirm" type="button" aria-label="Action"></button>
-          </div>
-        </section>
-        <button class="info-panel-toggle" type="button">
-          Value
-          <img
-            class="info-panel-toggle-icon"
-            src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
-            alt=""
-          />
-        </button>
-      </template>
     </main>
 
     <!--suppress HtmlUnknownTarget -->

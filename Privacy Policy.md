@@ -1,91 +1,73 @@
 # Privacy Policy
 
-Last updated: 2026-03-16
+Last updated: 2026-08-31
 
-## Overview
+## Summary
 
-MangaBaka URL Finder processes page data only to perform features requested by the user inside the extension popup.
+MangaBaka URL Finder processes the minimum page and series information needed to provide extension features. It does not sell user data, use user data for advertising, or include analytics or telemetry.
 
-The extension does not sell user data, does not use user data for advertising, and does not include analytics or telemetry.
+Requests go directly from the user's browser to MangaBaka, a selected provider, or GitHub. The extension does not send browsing activity or account content to the developer.
 
-## Data Processed
+## Page access and data processed
 
-The extension may read:
+The extension may process:
 
-- The active tab URL.
-- MangaBaka series titles, alternate titles, and author names.
-- Supported provider page titles needed for MangaBaka search or cached-result refresh.
-- Search terms derived from series titles when performing provider or MangaBaka lookups.
-- The optional MangaBaka profile name entered by the user.
+- The active tab URL and whether it is a supported MangaBaka or provider page.
+- A MangaBaka series identifier, media type, resolved display title, API titles, and author names.
+- A supported provider page title and URL.
+- Search terms derived from those titles.
+- The optional MangaBaka profile name entered in extension settings.
+- A provider URL selected for MangaBaka's `Read Link` field.
 
-## Local Storage
+A content script starts on `https://mangabaka.org/*` at `document_start` so it can receive the site's current series context even when that context is produced after initial page load or navigation. It keeps only the current URL, parsed series identifier and type, canonical URL, a matching visible `main h1[lang]`, and readiness identifiers in memory. It does not capture or persist MangaBaka account, library, cookie, or list-configuration data; inject visible page controls; track unrelated browsing; or start provider searches by itself. Normal series and provider lookups are initiated through the extension popup.
 
-The extension stores data only in `chrome.storage.local`.
+## Local storage
 
-Stored data may include:
+The extension stores settings and lookup state in `chrome.storage.local`. This may include:
 
-- Enabled provider settings.
-- Popup display preferences.
-- MangaBaka link button settings.
-- The optional MangaBaka profile name.
-- Cached provider lookup results.
-- Excluded provider URLs.
-- Cached search timestamps.
-- The inactive title flip state.
-- Release-check status for non-store installs, such as the last check time, current version, latest release metadata, and last attempted check time.
+- Enabled provider settings and popup display preferences.
+- MangaBaka navigation settings and the optional profile name.
+- Cached provider lookup results, exclusions, timestamps, and cached MangaBaka metadata.
+- Popup state used to display alternate or inactive titles.
+- Release-check timestamps and release metadata for local, non-store installs.
 
-This data stays in the user's browser profile unless the user clears it or uses the extension's reset controls.
+Versioned cache migrations may invalidate old lookup data when matching rules or upstream data conventions change. Only stable provider matches and genuine misses are cached; blocked, rate-limited, authentication, unavailable, network, aborted, and malformed-response outcomes are not. Stored data remains in the browser profile until the user clears it, uses an extension reset control, or uninstalls the extension.
 
-## Network Requests
+## Network requests
 
-The extension sends requests only when needed to perform user-facing features such as:
+Depending on the active page, enabled providers, and action selected by the user, requests may be sent to:
 
-- Reading MangaBaka metadata.
-- Searching supported providers.
-- Refreshing cached provider results.
-- Reading provider chapter data.
-- Saving a provider URL into MangaBaka's `Read Link` field when requested by the user.
-- Opening provider or MangaBaka pages requested by the user.
-- Checking the latest GitHub release once per day for local installs.
+- `api.mangabaka.org` and `mangabaka.org` for series metadata, MangaBaka navigation, and requested `Read Link` updates.
+- `api.github.com` and `github.com` for the once-daily release check used by local, non-store installs and for user-opened project links.
+- `atsu.moe`.
+- `mangadex.org` and `api.mangadex.org`.
+- `mangafire.to`.
+- `weebcentral.com`.
+- `e-hentai.org` and `exhentai.org` in the Complete package only.
 
-Depending on enabled providers and the active page, requests may be sent to:
+Google and Firefox store packages exclude the E-Hentai and ExHentai implementations, permissions, settings, and assets. They also exclude the local-install release checker and its `alarms` and GitHub API permissions. The extension does not use Yahoo Search and does not request Yahoo permissions.
 
-- Domain: `mangabaka.org`
-- Domain: `github.com`
-- Domain: `api.github.com`
-- Domain: `atsu.moe`
-- Domain: `mangadex.org`
-- Domain: `api.mangadex.org`
-- Domain: `mangafire.to`
-- Domain: `weebcentral.com`
-- Domain: `e-hentai.org`
-- Domain: `exhentai.org`
-- Domain: `search.yahoo.com`
+Remote sites receive the normal information associated with a browser request, such as the requested URL and network address, and handle that information under their own privacy policies. Public MangaBaka and provider requests explicitly omit credentials and do not attach site cookies. The Complete package's user-enabled ExHentai flow is the sole explicit credentialed request and may send the user's existing ExHentai session to ExHentai; the extension does not read or store those credentials.
 
-Google and Firefox packaged variants exclude `E-Hentai` and `ExHentai`.
+## Browser permissions
 
-## Alarms Permission
+- `storage` stores extension settings, caches, and release state locally.
+- `tabs` identifies the active page and opens user-requested destinations.
+- `scripting` supports narrowly scoped extraction from supported provider pages.
+- `alarms` is requested only by the Complete package and schedules the once-daily GitHub release check for local, non-store installs.
+- Host permissions allow direct requests only to MangaBaka, GitHub, and supported providers included in the installed package.
 
-The extension uses the `alarms` permission only to schedule a once-daily background task that checks whether a newer project release is available on GitHub for non-store installs. This lets the extension refresh update availability without requiring the user to manually open the popup at the exact time of the check.
+The alarm does not read page content or monitor browsing activity. It only wakes the background worker to refresh local release status.
 
-The alarm does not read page content, monitor browsing activity, or collect personal information. It only triggers the extension's own background worker to perform the update check and store the resulting timestamp and release status locally in `chrome.storage.local`.
+## Data sharing
 
-## Data Sharing
+The extension has no developer-operated collection endpoint. It does not transmit browsing history, account data, private library contents, or usage analytics to the developer. Data needed for a requested lookup or update is sent only to the site that provides that feature.
 
-The extension does not transmit browsing history, account data, or personal content to the developer.
+## User control
 
-Any network request made by the extension is sent directly from the user's browser to the destination site needed for the requested feature. No usage data is sent to the developer.
-
-## User Control
-
-Users can:
-
-- Enable or disable providers.
-- Clear cached lookups.
-- Reset all extension settings and local data.
-- Uninstall the extension at any time.
+Users can disable providers, clear cached lookups, reset extension settings and local data, and uninstall the extension at any time.
 
 ## Contact
 
-Project page: <https://github.com/Moriko1/MangaBakaURL-Finder>
-Chrome Web Store listing: <https://chromewebstore.google.com/detail/mangabaka-url-finder/akngneijkglanfogokinljffohnafhfb>
+- Project: <https://github.com/Moriko1/MangaBakaURL-Finder>
+- Chrome Web Store: <https://chromewebstore.google.com/detail/mangabaka-url-finder/akngneijkglanfogokinljffohnafhfb>
