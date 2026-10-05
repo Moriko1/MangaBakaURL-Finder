@@ -7,7 +7,10 @@ import type {
 } from "./types";
 import { providerFound, providerNoMatch } from "./types";
 import { extractHtmlAnchors } from "./html";
+import { buildMangaFireManualSearchUrl } from "./manual-search";
 import { canonicalHttpsUrl, dedupeStrings, getPathSegments, parseHttpUrl, slugToTitle } from "./url";
+
+export { buildMangaFireManualSearchUrl } from "./manual-search";
 
 const MANGAFIRE_HOSTNAMES = new Set(["mangafire.to", "www.mangafire.to"]);
 
@@ -99,10 +102,6 @@ export function parseMangaFireSearchResponse(body: string): ProviderOutcome<Prov
     });
   }
   return candidates.length > 0 ? providerFound("mangafire", candidates) : providerNoMatch("mangafire");
-}
-
-export function buildMangaFireManualSearchUrl(title: string): string {
-  return `https://mangafire.to/filter?keyword=${encodeURIComponent(title.trim())}`;
 }
 
 export const MANGAFIRE_ADAPTER: ProviderAdapter = {

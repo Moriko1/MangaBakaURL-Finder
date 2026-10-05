@@ -221,8 +221,14 @@ h1.title--inactive {
   opacity: 0.45;
 }
 
-.option-row--disabled input {
+.option-row--disabled input,
+.option-row--disabled select {
   cursor: not-allowed;
+}
+
+.option-row--disabled select {
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(244, 239, 230, 0.64);
 }
 
 .option-row input {

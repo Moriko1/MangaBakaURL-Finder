@@ -60,13 +60,9 @@ export function getPopupStatusPresentation(state: PopupPresentationState): Popup
   if (state.enabledProviderIds.length === 0) {
     return { message: "No providers enabled", tone: "error" };
   }
-  if (state.fromCache) {
-    return { message: "Loaded cached result", tone: "success" };
-  }
-
   const summary = summarizeProviderOutcomes(state.enabledProviderIds, state.outcomes);
   if (summary === "complete") {
-    return { message: "Search complete", tone: "success" };
+    return { message: state.fromCache ? "Loaded cached result" : "Search complete", tone: "success" };
   }
   if (summary === "partial") {
     return { message: "Search completed with some provider issues", tone: "error" };

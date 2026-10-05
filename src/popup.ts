@@ -6,6 +6,7 @@ import type {
 } from "./providers/types";
 import { fetchProviderSearchRequest, fetchProviderText } from "./providers/fetch";
 import { resolveStableProviderOutcome } from "./providers/cache";
+import { buildMangaBakaManualSearchUrl } from "./providers/manual-search";
 import { isStableProviderSearchOutcome, transitionProviderSearch } from "./providers/transition";
 import {
   buildAtsumaruMangaPageRequest,
@@ -21,6 +22,7 @@ import {
   parseMangaDexSeriesTitlesResponse,
   parseMangaDexTitleMetadataResponse,
 } from "./providers/mangadex";
+import { pickMangaDexSearchCandidate } from "./providers/mangadex-matching";
 import { getProviderAdapter, matchProviderPage as matchRegisteredProviderPage } from "./providers/registry";
 
 declare const __ADULT_PROVIDERS_ENABLED__: boolean;
@@ -36,7 +38,9 @@ import {
   isLookupCacheV12,
   LOOKUP_CACHE_PREFIX,
   LOOKUP_CACHE_SCHEMA_VERSION,
+  MANGADEX_LOOKUP_REVISION,
   migrateLookupCacheStorage,
+  refreshMangaDexCacheRevision,
   shouldInvalidateProviderResults,
   type CachedMangaBakaSeries,
   type LookupCacheV12,
@@ -45,6 +49,22 @@ import { MangaBakaApiClient, MangaBakaApiError, type MangaBakaSeries } from "./m
 import { parseMangaBakaSeriesUrl } from "./mangabaka/url";
 import { PageContextClient } from "./popup/page-context-client";
 import { getPopupStatusPresentation, resolvePopupRoute } from "./popup/controller";
+import {
+  DEFAULT_ENABLED_PROVIDERS,
+  DEFAULT_PROVIDER_LABEL_MODE,
+  DEFAULT_SETTINGS,
+  isContextMenuLinkTypeEnabled,
+  loadSettings,
+  normalizeContextMenuLinkType,
+  normalizeContextMenuMode,
+  normalizeLinkTargetType,
+  normalizeMangaBakaButtonTarget,
+  saveSettings as persistSettings,
+  type ExtensionSettings,
+  type LinkTargetType,
+  type OptionsPanelTab,
+  type ProviderSettingKey,
+} from "./settings";
 
 declare const __BUILD_VARIANT__: "complete" | "google" | "firefox";
 
@@ -166,24 +186,9 @@ interface EHentaiSearchResult {
   title: string;
 }
 
-interface ExtensionSettings {
-  enabledProviders: Record<ProviderKey, boolean>;
-  providerLabelMode: "titles" | "icons" | "stacked";
-  mangaBakaLinkType: LinkTargetType;
-  searchLinkType: LinkTargetType;
-  providerLinkType: LinkTargetType;
-  optionsPanelTab: OptionsPanelTab;
-  mangaBakaButtonTarget: MangaBakaButtonTarget;
-  mangaBakaProfileName: string;
-}
-
-type ProviderKey = keyof LookupResults;
-type ProviderLabelMode = ExtensionSettings["providerLabelMode"];
-type LinkTargetType = "current" | "new";
-type OptionsPanelTab = "providers" | "extension" | "info";
-type MangaBakaButtonTarget = "root" | "library" | "profile";
+type ProviderKey = ProviderSettingKey;
 type MangaDexChapterState = "available" | "purged" | "no_chapters_tld";
-type StoredMangaDexChapterState = Exclude<MangaDexChapterState, "available">;
+type StoredMangaDexChapterState = MangaDexChapterState;
 type MangaDexStatusIconKey = "slight-smile" | "melting-face" | "clown-face" | "pensive";
 type StatusTone = "idle" | "loading" | "success" | "error";
 type PopupViewState = "unsupported" | "invalid" | "loading" | "lookup" | "provider" | "error";
@@ -235,7 +240,6 @@ class InvalidMangaBakaPageError extends Error {
 }
 
 const CACHE_VERSION = LOOKUP_CACHE_SCHEMA_VERSION;
-const SETTINGS_KEY = "extension:settings";
 const POPUP_RELEASE_UPDATE_STORAGE_KEY = "extension:release-update";
 const LOCAL_INSTALL_SOURCE_URL = "https://github.com/Moriko1/MangaBakaURL-Finder/releases/latest";
 const GOOGLE_INSTALL_SOURCE_URL = "https://chromewebstore.google.com/detail/mangabaka-url-finder/akngneijkglanfogokinljffohnafhfb";
@@ -278,20 +282,6 @@ const PROVIDER_ICON_EXTENSIONS: Record<ProviderKey, string> = {
   weebcentral: "ico",
   ...(__ADULT_PROVIDERS_ENABLED__ ? { ehentai: "ico", exhentai: "ico" } : {}),
 } as Record<ProviderKey, string>;
-const DEFAULT_ENABLED_PROVIDERS: Record<ProviderKey, boolean> = {
-  atsu: true,
-  mangadex: true,
-  comixto: false,
-  mangafire: false,
-  weebcentral: false,
-  ...(__ADULT_PROVIDERS_ENABLED__ ? { ehentai: false, exhentai: false } : {}),
-} as Record<ProviderKey, boolean>;
-const DEFAULT_PROVIDER_LABEL_MODE: ProviderLabelMode = "titles";
-const DEFAULT_MANGABAKA_LINK_TARGET_TYPE: LinkTargetType = "current";
-const DEFAULT_SEARCH_LINK_TARGET_TYPE: LinkTargetType = "new";
-const DEFAULT_PROVIDER_LINK_TARGET_TYPE: LinkTargetType = "new";
-const DEFAULT_OPTIONS_PANEL_TAB: OptionsPanelTab = "providers";
-const DEFAULT_MANGABAKA_BUTTON_TARGET: MangaBakaButtonTarget = "root";
 const EMPTY_LOOKUP_RESULTS: LookupResults = {
   atsu: null,
   mangadex: null,
@@ -316,16 +306,6 @@ const EMPTY_TITLE_ATTEMPT_INDEXES: Record<ProviderKey, number> = {
   weebcentral: 0,
   ...(__ADULT_PROVIDERS_ENABLED__ ? { ehentai: 0, exhentai: 0 } : {}),
 } as Record<ProviderKey, number>;
-const DEFAULT_SETTINGS: ExtensionSettings = {
-  enabledProviders: { ...DEFAULT_ENABLED_PROVIDERS },
-  providerLabelMode: DEFAULT_PROVIDER_LABEL_MODE,
-  mangaBakaLinkType: DEFAULT_MANGABAKA_LINK_TARGET_TYPE,
-  searchLinkType: DEFAULT_SEARCH_LINK_TARGET_TYPE,
-  providerLinkType: DEFAULT_PROVIDER_LINK_TARGET_TYPE,
-  optionsPanelTab: DEFAULT_OPTIONS_PANEL_TAB,
-  mangaBakaButtonTarget: DEFAULT_MANGABAKA_BUTTON_TARGET,
-  mangaBakaProfileName: "",
-};
 const EXTENSION_MANIFEST = chrome.runtime.getManifest();
 const EXTENSION_VERSION_NAME = EXTENSION_MANIFEST.version_name ?? EXTENSION_MANIFEST.version;
 const EXTENSION_BUILD_DATE = (globalThis as typeof globalThis & { BUILD_DATE?: string }).BUILD_DATE ?? "Unknown";
@@ -454,6 +434,8 @@ let currentTabId: number | null = null;
 let currentCache: CachedLookup | null = null;
 let currentPageContext: MangaBakaSeriesPageContext | null = null;
 let currentPageContextClient: PageContextClient | null = null;
+let currentPageContextClientPromise: Promise<PageContextClient> | null = null;
+let currentPageContextTabId: number | null = null;
 let currentCachedResultFlags: Partial<Record<ProviderKey, boolean>> = {};
 let currentProviderSearchOutcomes: Partial<Record<ProviderKey, ProviderSearchOutcome>> = {};
 let pendingConfirmation: PendingConfirmation | null = null;
@@ -477,9 +459,65 @@ let infoPanelStatsRefreshPromise: Promise<void> | null = null;
 let infoPanelStatsRevision = 0;
 let inactiveTitleMarkupPromise: Promise<string> | null = null;
 let settingsWriteQueue: Promise<void> = Promise.resolve();
+let cacheStorageWriteQueue: Promise<void> = Promise.resolve();
+let providerActionQueue: Promise<void> = Promise.resolve();
+let providerActionsInProgress: Partial<Record<ProviderKey, boolean>> = {};
+let nextLookupGeneration = 0;
+let activeLookupGeneration = 0;
+let metadataRefreshInProgress = false;
+let isExtensionResetting = false;
 let profileNameSaveTimer: number | null = null;
 const RETRY_COOLDOWN_SECONDS = 2;
 const PROFILE_NAME_SAVE_DELAY_MS = 250;
+
+function beginLookupGeneration(): number {
+  activeLookupGeneration = ++nextLookupGeneration;
+  return activeLookupGeneration;
+}
+
+function invalidateLookupGeneration(): number {
+  activeLookupGeneration = ++nextLookupGeneration;
+  return activeLookupGeneration;
+}
+
+function isCurrentLookupGeneration(generation: number): boolean {
+  return generation === activeLookupGeneration;
+}
+
+async function queueProviderAction(
+  providerKey: ProviderKey,
+  action: (generation: number) => Promise<void>,
+): Promise<void> {
+  if (providerActionsInProgress[providerKey]) {
+    return;
+  }
+
+  const generation = activeLookupGeneration;
+  providerActionsInProgress[providerKey] = true;
+  rerenderCurrentResultsOnly();
+
+  try {
+    await queueCacheMutation(async () => {
+      if (!isCurrentLookupGeneration(generation)) {
+        return;
+      }
+      await action(generation);
+    });
+  } finally {
+    delete providerActionsInProgress[providerKey];
+    if (currentViewState === "lookup") {
+      rerenderCurrentResultsOnly();
+    }
+  }
+}
+
+async function queueCacheMutation(action: () => Promise<void>): Promise<void> {
+  const queuedAction = providerActionQueue.catch(() => undefined).then(async () => {
+    await action();
+  });
+  providerActionQueue = queuedAction.catch(() => undefined);
+  await queuedAction;
+}
 
 document.addEventListener("DOMContentLoaded", () => {
   void initializePopup().catch((error: unknown) => {
@@ -566,14 +604,17 @@ async function initializePopup(): Promise<void> {
 
   const seriesId = route.seriesId.toString();
   if (currentTabId != null) {
-    try {
-      currentPageContextClient = await PageContextClient.connect(currentTabId);
-      const context = currentPageContextClient.getLastContext();
+    const tabId = currentTabId;
+    // The bridge supplies a preferred display title and Read Link support. A slow
+    // page must not hold up cached results or the independent metadata API.
+    void getPageContextClient(tabId).then((client) => {
+      if (currentTabId !== tabId) return;
+      const context = client.getLastContext();
       currentPageContext = context?.seriesId === route.seriesId ? context : null;
-    } catch {
-      currentPageContextClient = null;
-      currentPageContext = null;
-    }
+      if (currentCache && currentViewState === "lookup") {
+        getTitleNode().textContent = resolveCachedDisplayTitle(currentCache);
+      }
+    }).catch(() => undefined);
   }
 
   setResetEnabled(true);
@@ -583,12 +624,25 @@ async function initializePopup(): Promise<void> {
   if (cachedLookup) {
     currentCache = cachedLookup;
     currentCachedResultFlags = buildCachedResultFlags(cachedLookup.results, true);
+    metadataRefreshInProgress = true;
     renderLookup(cachedLookup, true);
+    const generation = beginLookupGeneration();
 
     try {
       const refreshedMetadata = await fetchMangaBakaMetadata(currentSourceUrl, seriesId);
+      if (!isCurrentLookupGeneration(generation)) {
+        return;
+      }
       if (shouldInvalidateProviderResults(cachedLookup.series, refreshedMetadata.apiSeries.titles)) {
-        await persistMetadataOnlyInvalidation(refreshedMetadata);
+        await queueCacheMutation(async () => {
+          if (isCurrentLookupGeneration(generation)) {
+            await persistMetadataOnlyInvalidation(refreshedMetadata);
+          }
+        });
+        if (!isCurrentLookupGeneration(generation)) {
+          return;
+        }
+        metadataRefreshInProgress = false;
         await runLookup(
           refreshedMetadata.sourceUrl,
           seriesId,
@@ -599,22 +653,64 @@ async function initializePopup(): Promise<void> {
         return;
       }
 
-      const refreshedCache: CachedLookup = {
-        ...cachedLookup,
-        series: createCachedSeries(refreshedMetadata),
-      };
-      await saveCache(refreshedCache);
-      currentCache = refreshedCache;
-      renderLookup(refreshedCache, true);
+      await queueCacheMutation(async () => {
+        if (!isCurrentLookupGeneration(generation) || !currentCache) {
+          return;
+        }
+        await refreshPendingMangaDexLookup(refreshedMetadata, generation);
+        if (!isCurrentLookupGeneration(generation) || !currentCache) {
+          return;
+        }
+        const refreshedCache: CachedLookup = {
+          ...currentCache,
+          series: createCachedSeries(refreshedMetadata),
+        };
+        await saveCache(refreshedCache);
+        if (isCurrentLookupGeneration(generation)) {
+          currentCache = refreshedCache;
+        }
+      });
+      if (!isCurrentLookupGeneration(generation)) {
+        return;
+      }
+      metadataRefreshInProgress = false;
+      if (currentCache) {
+        renderLookup(currentCache, true);
+      }
     } catch (error) {
+      if (!isCurrentLookupGeneration(generation)) {
+        return;
+      }
       if (error instanceof InvalidMangaBakaPageError) {
-        await clearCache(seriesId);
-        currentCache = null;
+        await queueCacheMutation(async () => {
+          if (!isCurrentLookupGeneration(generation)) {
+            return;
+          }
+          await clearCache(seriesId);
+          if (isCurrentLookupGeneration(generation)) {
+            currentCache = null;
+          }
+        });
+        if (!isCurrentLookupGeneration(generation)) {
+          return;
+        }
+        metadataRefreshInProgress = false;
         await renderInvalidPageState();
         return;
       }
+      metadataRefreshInProgress = false;
+      if (currentCache) {
+        renderLookup(currentCache, true);
+      }
       setStatus("Loaded cached API metadata; MangaBaka refresh failed. Retry is available.", "error");
       wireCachedMetadataRetryButton(seriesId);
+    } finally {
+      if (isCurrentLookupGeneration(generation) && metadataRefreshInProgress) {
+        metadataRefreshInProgress = false;
+        if (currentViewState === "lookup") {
+          rerenderCurrentResultsOnly();
+        }
+      }
     }
     return;
   }
@@ -632,6 +728,35 @@ async function getActiveTab(): Promise<{ id?: number; url?: string; title?: stri
   return tabs[0] ?? null;
 }
 
+async function getPageContextClient(tabId: number): Promise<PageContextClient> {
+  if (currentPageContextTabId === tabId) {
+    if (currentPageContextClient && !currentPageContextClient.isDisconnected()) {
+      return currentPageContextClient;
+    }
+    if (currentPageContextClientPromise) return currentPageContextClientPromise;
+  }
+
+  currentPageContextClient?.disconnect();
+  currentPageContextClient = null;
+  currentPageContext = null;
+  currentPageContextTabId = tabId;
+  const connection = PageContextClient.connect(tabId);
+  currentPageContextClientPromise = connection;
+  try {
+    const client = await connection;
+    if (currentPageContextClientPromise !== connection) {
+      client.disconnect();
+      throw new Error("The active MangaBaka tab changed while connecting.");
+    }
+    currentPageContextClient = client;
+    return client;
+  } finally {
+    if (currentPageContextClientPromise === connection) {
+      currentPageContextClientPromise = null;
+    }
+  }
+}
+
 function isPopupMissingTabError(error: unknown): boolean {
   return error instanceof Error && /No tab with id|Tabs cannot be edited right now|tab was closed/i.test(error.message);
 }
@@ -639,7 +764,8 @@ function isPopupMissingTabError(error: unknown): boolean {
 async function resolveUsableTabId(): Promise<number | null> {
   if (currentTabId != null) {
     try {
-      await chrome.tabs.get(currentTabId);
+      const currentTab = await chrome.tabs.get(currentTabId);
+      currentSourceUrl = currentTab.url ?? currentSourceUrl;
       return currentTabId;
     } catch (error) {
       if (!isPopupMissingTabError(error)) {
@@ -824,54 +950,21 @@ function getCacheKey(seriesId: string): string {
   return getLookupCacheKey(seriesId);
 }
 
-async function loadSettings(): Promise<ExtensionSettings> {
-  const stored = await chrome.storage.local.get(SETTINGS_KEY);
-  const settings = stored[SETTINGS_KEY] as ExtensionSettings | undefined;
-  const storedEnabledProviders = settings?.enabledProviders;
-  const providerLabelMode = settings?.providerLabelMode;
-  const mangaBakaLinkType = normalizeLinkTargetType(settings?.mangaBakaLinkType, DEFAULT_MANGABAKA_LINK_TARGET_TYPE);
-  const hasStoredSearchLinkType = settings?.searchLinkType === "current" || settings?.searchLinkType === "new";
-  const searchLinkType = normalizeLinkTargetType(
-    settings?.searchLinkType,
-    normalizeLinkTargetType(settings?.providerLinkType, DEFAULT_SEARCH_LINK_TARGET_TYPE),
-  );
-  const providerLinkType = hasStoredSearchLinkType
-    ? normalizeLinkTargetType(settings?.providerLinkType, DEFAULT_PROVIDER_LINK_TARGET_TYPE)
-    : DEFAULT_PROVIDER_LINK_TARGET_TYPE;
-  const optionsPanelTab = normalizeOptionsPanelTab(settings?.optionsPanelTab);
-  const mangaBakaButtonTarget = normalizeMangaBakaButtonTarget(settings?.mangaBakaButtonTarget);
-
-  return {
-    enabledProviders: {
-      ...DEFAULT_ENABLED_PROVIDERS,
-      ...storedEnabledProviders,
-      comixto: false,
-    },
-    providerLabelMode: providerLabelMode === "icons" || providerLabelMode === "stacked"
-      ? providerLabelMode
-      : DEFAULT_PROVIDER_LABEL_MODE,
-    mangaBakaLinkType,
-    searchLinkType,
-    providerLinkType,
-    optionsPanelTab,
-    mangaBakaButtonTarget,
-    mangaBakaProfileName: typeof settings?.mangaBakaProfileName === "string" ? settings.mangaBakaProfileName : "",
-  };
-}
-
 async function saveSettings(settings: ExtensionSettings): Promise<void> {
-  const snapshot: ExtensionSettings = {
-    ...settings,
-    enabledProviders: { ...settings.enabledProviders },
-  };
+  if (isExtensionResetting) {
+    return;
+  }
   const write = settingsWriteQueue
     .catch(() => undefined)
-    .then(() => chrome.storage.local.set({ [SETTINGS_KEY]: snapshot }));
+    .then(() => persistSettings(settings));
   settingsWriteQueue = write;
   await write;
 }
 
 function queueProfileNameSave(): void {
+  if (isExtensionResetting) {
+    return;
+  }
   if (profileNameSaveTimer != null) {
     window.clearTimeout(profileNameSaveTimer);
   }
@@ -978,6 +1071,20 @@ function wireOptionsControls(): void {
     }), "Unable to update the provider link setting.");
   };
 
+  getContextMenuModeSelect().onchange = () => {
+    runPopupTask(() => updateSettings({
+      ...currentSettings,
+      contextMenuMode: normalizeContextMenuMode(getContextMenuModeSelect().value),
+    }), "Unable to update the context menu setting.");
+  };
+
+  getContextMenuLinkTypeSelect().onchange = () => {
+    runPopupTask(() => updateSettings({
+      ...currentSettings,
+      contextMenuLinkType: normalizeContextMenuLinkType(getContextMenuLinkTypeSelect().value),
+    }), "Unable to update the context menu link setting.");
+  };
+
   getMangaBakaButtonTargetSelect().onchange = () => {
     runPopupTask(() => updateSettings({
       ...currentSettings,
@@ -1019,6 +1126,12 @@ function renderOptionsPanel(): void {
   getMangaBakaLinkTypeSelect().value = currentSettings.mangaBakaLinkType;
   getSearchLinkTypeSelect().value = currentSettings.searchLinkType;
   getProviderLinkTypeSelect().value = currentSettings.providerLinkType;
+  getContextMenuModeSelect().value = currentSettings.contextMenuMode;
+  getContextMenuLinkTypeSelect().value = currentSettings.contextMenuLinkType;
+  const contextMenuLinkTypeEnabled = isContextMenuLinkTypeEnabled(currentSettings.contextMenuMode);
+  getContextMenuLinkTypeRow().classList.toggle("option-row--disabled", !contextMenuLinkTypeEnabled);
+  getContextMenuLinkTypeRow().setAttribute("aria-disabled", String(!contextMenuLinkTypeEnabled));
+  getContextMenuLinkTypeSelect().disabled = !contextMenuLinkTypeEnabled;
   getMangaBakaButtonTargetSelect().value = currentSettings.mangaBakaButtonTarget;
   getMangaBakaProfileNameInput().value = currentSettings.mangaBakaProfileName;
   renderInfoPanel();
@@ -1027,35 +1140,47 @@ function renderOptionsPanel(): void {
 }
 
 async function updateSettings(settings: ExtensionSettings): Promise<void> {
+  if (isExtensionResetting) {
+    return;
+  }
   const previousSettings = currentSettings;
   currentSettings = settings;
   renderOptionsPanel();
   await saveSettings(currentSettings);
+  if (isExtensionResetting) {
+    return;
+  }
   void syncActionIcon();
 
-  if (currentCache) {
-    const searchedProviders = { ...currentCache.searchedProviders };
-    for (const provider of PROVIDERS) {
-      if (
-        !previousSettings.enabledProviders[provider.key] &&
-        currentSettings.enabledProviders[provider.key] &&
-        !searchedProviders[provider.key]
-      ) {
-        searchedProviders[provider.key] = false;
+  await queueCacheMutation(async () => {
+    if (currentCache) {
+      const searchedProviders = { ...currentCache.searchedProviders };
+      for (const provider of PROVIDERS) {
+        if (
+          !previousSettings.enabledProviders[provider.key] &&
+          currentSettings.enabledProviders[provider.key] &&
+          !searchedProviders[provider.key]
+        ) {
+          searchedProviders[provider.key] = false;
+        }
       }
-    }
 
-    currentCache = {
-      ...currentCache,
-      searchedProviders,
-    };
-    await saveCache(currentCache);
-  }
+      const updatedCache: CachedLookup = {
+        ...currentCache,
+        searchedProviders,
+      };
+      await saveCache(updatedCache);
+      currentCache = updatedCache;
+    }
+  });
 
   await rerenderCurrentView();
 }
 
 async function updateOptionsPanelTab(optionsPanelTab: OptionsPanelTab): Promise<void> {
+  if (isExtensionResetting) {
+    return;
+  }
   if (currentSettings.optionsPanelTab === optionsPanelTab) {
     renderOptionsPanelTabs();
     if (optionsPanelTab === "info" && isOptionsPanelOpen()) {
@@ -1073,32 +1198,6 @@ async function updateOptionsPanelTab(optionsPanelTab: OptionsPanelTab): Promise<
     await refreshInfoPanelStatsIfNeeded();
   }
   await saveSettings(currentSettings);
-}
-
-function normalizeLinkTargetType(value: string | undefined, fallback: LinkTargetType = DEFAULT_MANGABAKA_LINK_TARGET_TYPE): LinkTargetType {
-  return value === "new" || value === "current" ? value : fallback;
-}
-
-function normalizeOptionsPanelTab(value: string | undefined): OptionsPanelTab {
-  switch (value) {
-    case "providers":
-    case "extension":
-    case "info":
-      return value;
-    default:
-      return DEFAULT_OPTIONS_PANEL_TAB;
-  }
-}
-
-function normalizeMangaBakaButtonTarget(value: string | undefined): MangaBakaButtonTarget {
-  switch (value) {
-    case "root":
-    case "library":
-    case "profile":
-      return value;
-    default:
-      return DEFAULT_MANGABAKA_BUTTON_TARGET;
-  }
 }
 
 function renderOptionsPanelTabs(): void {
@@ -1331,7 +1430,8 @@ function getMangaDexChapterState(result: ProviderMatch | null): MangaDexChapterS
     return result.manualMangaDexChapterState;
   }
 
-  if (typeof result.latestChapterNumber === "string" && result.latestChapterNumber.length > 0) {
+  if (result.mangaDexChapterState === "available"
+    || (typeof result.latestChapterNumber === "string" && result.latestChapterNumber.length > 0)) {
     return "available";
   }
 
@@ -1384,7 +1484,7 @@ async function refreshInfoPanelStats(): Promise<void> {
     seriesCount += 1;
     totalBytes += estimateStorageEntryBytes(key, value);
 
-    const mangaDexResult = hydrateProviderState(value.providers).results.mangadex;
+    const mangaDexResult = hydrateProviderState(refreshMangaDexCacheRevision(value.providers)).results.mangadex;
     if (!mangaDexResult) {
       continue;
     }
@@ -1402,14 +1502,28 @@ async function refreshInfoPanelStats(): Promise<void> {
 }
 
 async function handleExtensionReset(): Promise<void> {
+  if (isExtensionResetting) {
+    return;
+  }
+  isExtensionResetting = true;
+  invalidateLookupGeneration();
+  metadataRefreshInProgress = false;
   setStatus("Resetting extension...", "loading");
+  currentCache = null;
   if (profileNameSaveTimer != null) {
     window.clearTimeout(profileNameSaveTimer);
     profileNameSaveTimer = null;
   }
-  await settingsWriteQueue.catch(() => undefined);
-  await chrome.storage.local.clear();
-  currentCache = null;
+  try {
+    await settingsWriteQueue.catch(() => undefined);
+    await queueCacheMutation(async () => {
+      await cacheStorageWriteQueue.catch(() => undefined);
+      await chrome.storage.local.clear();
+    });
+  } catch (error) {
+    isExtensionResetting = false;
+    throw error;
+  }
   currentCachedResultFlags = {};
   currentSettings = {
     ...DEFAULT_SETTINGS,
@@ -1417,6 +1531,7 @@ async function handleExtensionReset(): Promise<void> {
   };
   retryCountdowns = {};
   retryInProgress = {};
+  providerActionsInProgress = {};
   armedReadLinkSaves = {};
   readLinkSaveInProgress = null;
   currentCacheSeriesStats = { seriesCount: 0, totalBytes: 0 };
@@ -1579,7 +1694,9 @@ async function getProviderPageContext(url: string): Promise<ProviderPageContext 
     providerKey: match.providerKey,
     providerLabel: PROVIDER_LABELS[match.providerKey],
     pageType: match.pageType,
-    primaryTitle: titles.length > 0 ? pickPreferredTitle(titles) : PROVIDER_LABELS[match.providerKey],
+    primaryTitle: titles.length > 0
+      ? match.providerKey === "mangadex" ? titles[0] : pickPreferredTitle(titles)
+      : PROVIDER_LABELS[match.providerKey],
     titles,
     sourceUrl: url,
     isSearchable: titles.length > 0,
@@ -1591,7 +1708,9 @@ async function extractProviderPageMetadata(
   sourceUrl: string,
   pageType: "series" | "chapter",
 ): Promise<ExtractedMetadataPayload | null> {
-  if (providerKey === "mangadex" && pageType === "chapter") {
+  if (providerKey === "mangadex") {
+    // The API identifies the current manga by UUID. Page headings and links
+    // can describe navigation, loading states, or other series.
     return fetchMangaDexProviderPageMetadata(sourceUrl, pageType);
   }
 
@@ -1923,10 +2042,10 @@ async function fetchMangaDexProviderPageMetadata(
       }
 
       const parsed = parseMangaDexSeriesTitlesResponse(response.value.body);
-      if (parsed.kind !== "found") {
+      if (parsed.kind !== "found" || parsed.value.seriesId !== segments[1].toLowerCase()) {
         return null;
       }
-      const titles = cleanProviderPageTitles("mangadex", parsed.value.titles);
+      const titles = dedupeTitles(parsed.value.titles);
       return titles.length > 0 ? { titles, authors: [] } : null;
     }
 
@@ -1944,7 +2063,7 @@ async function fetchMangaDexProviderPageMetadata(
         return null;
       }
 
-      let titles = cleanProviderPageTitles("mangadex", chapterMetadata.value.titles);
+      let titles = dedupeTitles(chapterMetadata.value.titles);
       if (titles.length === 0) {
         const seriesResponse = await fetchProviderText({
           providerId: "mangadex",
@@ -1954,10 +2073,10 @@ async function fetchMangaDexProviderPageMetadata(
           return null;
         }
         const seriesMetadata = parseMangaDexSeriesTitlesResponse(seriesResponse.value.body);
-        if (seriesMetadata.kind !== "found") {
+        if (seriesMetadata.kind !== "found" || seriesMetadata.value.seriesId !== chapterMetadata.value.seriesId) {
           return null;
         }
-        titles = cleanProviderPageTitles("mangadex", seriesMetadata.value.titles);
+        titles = dedupeTitles(seriesMetadata.value.titles);
       }
       return titles.length > 0 ? { titles, authors: [] } : null;
     }
@@ -2058,6 +2177,9 @@ async function extractProviderPageMetadataFromActiveTab(
       target: { tabId },
       args: [providerKey, sourceUrl],
       func: (activeProviderKey: ProviderKey, activeSourceUrl: string) => {
+        if (activeProviderKey === "mangadex") {
+          return null;
+        }
         const parsedSourceUrl = new URL(activeSourceUrl);
         const sourceSegments = parsedSourceUrl.pathname.split("/").filter(Boolean);
 
@@ -2162,7 +2284,6 @@ async function extractProviderPageMetadataFromActiveTab(
           switch (activeProviderKey) {
             case "atsu":
               return stripTrailingChapterInfo(trimmed);
-            case "mangadex":
             case "mangafire":
             case "weebcentral":
               return stripTrailingChapterInfo(trimmed);
@@ -2368,14 +2489,6 @@ async function extractProviderPageMetadataFromActiveTab(
         if (__ADULT_PROVIDERS_ENABLED__ && (activeProviderKey === "ehentai" || activeProviderKey === "exhentai")) {
           addSelectorText(["#gn", "#gj", "h1"], prioritizedCandidates);
         } else switch (activeProviderKey) {
-          case "mangadex": {
-            if (sourceSegments[0] === "title" && sourceSegments[2]) {
-              prioritizedCandidates.push(hyphenatedTitleToText(sourceSegments[2]));
-            }
-            addAnchorMatches(/^\/title\/[^/]+(?:\/[^/]+)?$/i, prioritizedCandidates);
-            addSelectorText(["main h1", "main h2", "main [role='heading']", "header h1", "header h2"], prioritizedCandidates);
-            break;
-          }
           case "atsu": {
             prioritizedCandidates.push(...extractAtsumaruWindowDataTitles());
             addSelectorText(["main h1", "main h2", "header h1", "header h2"], prioritizedCandidates);
@@ -2426,10 +2539,6 @@ async function extractProviderPageMetadataFromActiveTab(
   }
 }
 
-function buildMangaBakaSearchUrl(title: string): string {
-  return `https://mangabaka.org/search?q=${encodeURIComponent(title)}`;
-}
-
 function getUrlPathSegments(sourceUrl: string): string[] {
   try {
     return new URL(sourceUrl).pathname.split("/").filter(Boolean);
@@ -2471,14 +2580,12 @@ function createEmptyLookupResults(): LookupResults {
   return { ...EMPTY_LOOKUP_RESULTS };
 }
 
-function createInitialSearchedProviders(enabledProviders: Record<ProviderKey, boolean>): Record<ProviderKey, boolean> {
-  return PROVIDER_KEYS.reduce(
-    (result, providerKey) => {
-      result[providerKey] = enabledProviders[providerKey];
-      return result;
-    },
-    {} as Record<ProviderKey, boolean>,
-  );
+function createInitialSearchedProviders(searchedProviderKeys: readonly ProviderKey[]): Record<ProviderKey, boolean> {
+  const searchedProviders = createUnsearchedProviders();
+  for (const providerKey of searchedProviderKeys) {
+    searchedProviders[providerKey] = true;
+  }
+  return searchedProviders;
 }
 
 function cloneRejectedProviderUrls(rejectedUrls: RejectedProviderUrls): RejectedProviderUrls {
@@ -2539,6 +2646,7 @@ function createProviderCacheSnapshot(
       results[providerKey],
     );
     return [providerKey, {
+      ...(providerKey === "mangadex" ? { lookupRevision: MANGADEX_LOOKUP_REVISION } : {}),
       searched: stableOutcome ? searchedProviders[providerKey] : false,
       result: stableOutcome?.kind === "found" ? results[providerKey] : null,
       outcome: stableOutcome,
@@ -2677,9 +2785,11 @@ async function loadCache(seriesId: string): Promise<CachedLookup | null> {
     return null;
   }
 
-  const providerState = hydrateProviderState(cache.providers);
+  const providers = refreshMangaDexCacheRevision(cache.providers);
+  const providerState = hydrateProviderState(providers);
   const normalizedCache: CachedLookup = {
     ...cache,
+    providers,
     rejectedUrls: providerState.rejectedUrls,
     titleAttemptIndexes: providerState.titleAttemptIndexes,
     results: providerState.results,
@@ -2704,14 +2814,18 @@ async function saveCache(cache: CachedLookup): Promise<void> {
     searchedAt: cache.searchedAt,
   };
   cache.providers = providers;
-  await chrome.storage.local.set({
+  const write = cacheStorageWriteQueue.catch(() => undefined).then(() => chrome.storage.local.set({
     [getCacheKey(cache.series.requestedSeriesId.toString())]: persistedCache,
-  });
+  }));
+  cacheStorageWriteQueue = write;
+  await write;
   invalidateInfoPanelStats();
 }
 
 async function clearCache(seriesId: string): Promise<void> {
-  await chrome.storage.local.remove(getCacheKey(seriesId));
+  const write = cacheStorageWriteQueue.catch(() => undefined).then(() => chrome.storage.local.remove(getCacheKey(seriesId)));
+  cacheStorageWriteQueue = write;
+  await write;
   invalidateInfoPanelStats();
 }
 
@@ -2722,17 +2836,28 @@ async function runLookup(
   titleAttemptIndexes: Record<ProviderKey, number>,
   metadataOverride?: MangaBakaMetadata,
 ): Promise<void> {
+  const generation = beginLookupGeneration();
   currentCache = null;
+  currentProviderSearchOutcomes = {};
+  metadataRefreshInProgress = false;
+  setResetEnabled(false);
   setStatus("Reading MangaBaka metadata...", "loading");
   renderLoadingState();
 
   try {
     const metadata = metadataOverride ?? (await fetchMangaBakaMetadata(sourceUrl, seriesId));
+    if (!isCurrentLookupGeneration(generation)) {
+      return;
+    }
     setStatus("Searching enabled providers...", "loading");
-    const results = await searchProviders(metadata, rejectedUrls, titleAttemptIndexes);
-    const searchedProviders = createInitialSearchedProviders(currentSettings.enabledProviders);
+    const { outcomes, results, searchedProviderKeys } = await searchProviders(metadata, rejectedUrls, titleAttemptIndexes);
+    if (!isCurrentLookupGeneration(generation)) {
+      return;
+    }
+    currentProviderSearchOutcomes = outcomes;
+    const searchedProviders = createInitialSearchedProviders(searchedProviderKeys);
     for (const providerKey of PROVIDER_KEYS) {
-      const outcome = currentProviderSearchOutcomes[providerKey];
+      const outcome = outcomes[providerKey];
       if (outcome && !isStableProviderSearchOutcome(outcome)) {
         searchedProviders[providerKey] = false;
       }
@@ -2749,11 +2874,20 @@ async function runLookup(
       searchedAt: new Date().toISOString(),
     };
 
+    if (!isCurrentLookupGeneration(generation)) {
+      return;
+    }
     await saveCache(cache);
+    if (!isCurrentLookupGeneration(generation)) {
+      return;
+    }
     currentCache = cache;
     currentCachedResultFlags = buildCachedResultFlags(results, false);
     renderLookup(cache, false);
   } catch (error) {
+    if (!isCurrentLookupGeneration(generation)) {
+      return;
+    }
     currentCache = null;
     if (error instanceof InvalidMangaBakaPageError) {
       await renderInvalidPageState();
@@ -2811,9 +2945,13 @@ async function searchProviders(
   metadata: MangaBakaMetadata,
   rejectedUrls: RejectedProviderUrls,
   titleAttemptIndexes: Record<ProviderKey, number>,
-): Promise<LookupResults> {
+): Promise<{
+  outcomes: Partial<Record<ProviderKey, ProviderSearchOutcome>>;
+  results: LookupResults;
+  searchedProviderKeys: ProviderKey[];
+}> {
   const results = createEmptyLookupResults();
-  currentProviderSearchOutcomes = {};
+  const outcomes: Partial<Record<ProviderKey, ProviderSearchOutcome>> = {};
   const enabledProviderKeys = PROVIDER_KEYS.filter(
     (providerKey) => currentSettings.enabledProviders[providerKey] && providerKey !== "comixto",
   );
@@ -2832,11 +2970,11 @@ async function searchProviders(
           providerId: providerKey as ProviderId,
           message: "Provider search failed unexpectedly",
         };
-    currentProviderSearchOutcomes[providerKey] = outcome;
+    outcomes[providerKey] = outcome;
     results[providerKey] = outcome.kind === "found" ? outcome.value : null;
   });
 
-  return results;
+  return { outcomes, results, searchedProviderKeys: enabledProviderKeys };
 }
 
 async function searchProviderOutcome(
@@ -3037,7 +3175,7 @@ async function searchMangaDex(
   if (candidateOutcome.kind !== "found") {
     return retypeProviderOutcome<ProviderMatch>(candidateOutcome);
   }
-  const bestMatch = pickBestProviderSearchCandidate(candidateOutcome.value, metadata, rejectedUrls);
+  const bestMatch = pickMangaDexSearchCandidate(candidateOutcome.value, metadata.titles, rejectedUrls);
   if (!bestMatch?.seriesId) {
     return noProviderMatch("mangadex");
   }
@@ -3071,11 +3209,34 @@ async function searchMangaDex(
       url: bestMatch.url,
       latestChapterNumber: chapterAvailability.latestChapterNumber,
       latestChapterLanguage: chapterAvailability.state === "available" ? "en" : null,
-      mangaDexChapterState: chapterAvailability.state === "available" ? null : chapterAvailability.state,
+      mangaDexChapterState: chapterAvailability.state,
       manualPurgedChapterNumber: null,
       manualMangaDexChapterState: null,
     },
   };
+}
+
+async function refreshPendingMangaDexLookup(metadata: MangaBakaMetadata, generation: number): Promise<void> {
+  const cached = currentCache;
+  const mangaDexState = cached?.providers.mangadex as { lookupRevision?: number } | undefined;
+  if (!cached || !currentSettings.enabledProviders.mangadex
+    || cached.searchedProviders.mangadex
+    || mangaDexState?.lookupRevision !== MANGADEX_LOOKUP_REVISION) {
+    return;
+  }
+
+  const outcome = await searchMangaDex(metadata, cached.rejectedUrls.mangadex, cached.titleAttemptIndexes.mangadex);
+  if (!isCurrentLookupGeneration(generation) || !currentCache) {
+    return;
+  }
+  currentProviderSearchOutcomes.mangadex = outcome;
+  currentCache = {
+    ...currentCache,
+    results: { ...currentCache.results, mangadex: outcome.kind === "found" ? outcome.value : null },
+    searchedProviders: { ...currentCache.searchedProviders, mangadex: isStableProviderSearchOutcome(outcome) },
+    searchedAt: new Date().toISOString(),
+  };
+  currentCachedResultFlags.mangadex = false;
 }
 
 async function fetchMangaDexLatestEnglishChapterInfo(
@@ -3107,7 +3268,7 @@ async function fetchMangaDexLatestEnglishChapterInfo(
     value: {
       latestChapterNumber: availability.latestChapterNumber,
       latestChapterLanguage: availability.state === "available" ? "en" : null,
-      mangaDexChapterState: availability.state === "available" ? null : availability.state,
+      mangaDexChapterState: availability.state,
     },
   };
 }
@@ -3548,6 +3709,7 @@ function renderLoadingState(): void {
   currentViewState = "loading";
   currentProviderPage = null;
   currentCachedResultFlags = {};
+  setResetEnabled(false);
   clearPendingConfirmation();
   const resultsNode = getResultsNode();
   resultsNode.innerHTML = "";
@@ -3718,8 +3880,9 @@ function renderProviderRows(
       Boolean(providerResult)
       && currentViewState === "lookup"
       && currentCachedResultFlags[provider.key] === true;
-    const retryBusy = retryInProgress[provider.key] === true;
-    const canSearchNow = Boolean(options.cache) && providerEnabled && !providerSearched && !providerResult;
+    const providerBusy = metadataRefreshInProgress || providerActionsInProgress[provider.key] === true;
+    const retryBusy = retryInProgress[provider.key] === true || providerBusy;
+    const canSearchNow = Boolean(options.cache) && providerEnabled && !providerSearched && !providerResult && !providerBusy;
     const attemptIndex = options.cache?.titleAttemptIndexes?.[provider.key] ?? 0;
     const titleCount = options.cache?.series.rankedSearchTitles.length ?? 0;
     const searchOutcome = currentProviderSearchOutcomes[provider.key];
@@ -3768,8 +3931,10 @@ function renderProviderRows(
     meta.className = "provider-value-meta";
     const mangaDexChapterState = provider.key === "mangadex" ? getMangaDexChapterState(providerResult) : null;
     if (provider.key === "mangadex" && providerResult) {
-      if (mangaDexChapterState === "available" && providerResult.latestChapterNumber) {
-        const latestLabel = `Ch. ${providerResult.latestChapterNumber.replace(/^page\.\s*/i, "")}`;
+      if (mangaDexChapterState === "available") {
+        const latestLabel = providerResult.latestChapterNumber
+          ? `Ch. ${providerResult.latestChapterNumber.replace(/^page\.\s*/i, "")}`
+          : "English chapters available";
         meta.innerHTML = `${ENGLISH_FLAG_ICON}<span>${escapeHtml(latestLabel)}</span>`;
       } else if (mangaDexChapterState === "no_chapters_tld") {
         meta.innerHTML = `${ENGLISH_FLAG_ICON}<span>No Chapters TL'd</span>`;
@@ -3932,9 +4097,9 @@ function renderProviderRows(
       "icon-button icon-button--reset",
       INCORRECT_ICON,
       providerResult ? `Mark the current ${providerLabel} result incorrect and search again` : `${providerLabel} unavailable`,
-      !providerResult || !options.enableProviderReset || !providerEnabled,
+      !providerResult || !options.enableProviderReset || !providerEnabled || providerBusy,
       (button) => {
-        if (!providerResult || !options.enableProviderReset || !providerEnabled) {
+        if (!providerResult || !options.enableProviderReset || !providerEnabled || providerBusy) {
           return;
         }
 
@@ -3948,9 +4113,9 @@ function renderProviderRows(
       "icon-button",
       RESET_ICON,
       providerResult ? `Refresh the cached ${providerLabel} result` : `${providerLabel} unavailable`,
-      !providerResult || !shouldShowRefreshButton,
+      !providerResult || !shouldShowRefreshButton || providerBusy,
       () => {
-        if (!providerResult || !shouldShowRefreshButton) {
+        if (!providerResult || !shouldShowRefreshButton || providerBusy) {
           return;
         }
 
@@ -4150,13 +4315,21 @@ async function openProviderHomepage(providerKey: ProviderKey, providerLabel: str
 
 async function openMangaBakaSearch(title: string): Promise<void> {
   try {
-    await openUrlWithPreference(buildMangaBakaSearchUrl(title), currentSettings.searchLinkType);
+    await openUrlWithPreference(buildMangaBakaManualSearchUrl(title), currentSettings.searchLinkType);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : "Unable to search MangaBaka", "error");
   }
 }
 
-async function handleProviderRefresh(providerKey: ProviderKey): Promise<void> {
+async function handleProviderRefresh(providerKey: ProviderKey, generation?: number): Promise<void> {
+  if (generation == null) {
+    await queueProviderAction(providerKey, (queuedGeneration) => handleProviderRefresh(providerKey, queuedGeneration));
+    return;
+  }
+
+  if (!isCurrentLookupGeneration(generation)) {
+    return;
+  }
   if (!currentCache || currentViewState !== "lookup" || currentCachedResultFlags[providerKey] !== true) {
     return;
   }
@@ -4170,6 +4343,9 @@ async function handleProviderRefresh(providerKey: ProviderKey): Promise<void> {
   setStatus(`Refreshing cached ${providerLabel} result...`, "loading");
 
   const { status, document } = await fetchProviderDocumentWithStatus(currentResult.url);
+  if (!isCurrentLookupGeneration(generation) || !currentCache) {
+    return;
+  }
   if (!document) {
     if (status === 404 || status === 410) {
       const updatedCache: CachedLookup = {
@@ -4196,6 +4372,9 @@ async function handleProviderRefresh(providerKey: ProviderKey): Promise<void> {
       delete armedReadLinkSaves[providerKey];
       delete currentCachedResultFlags[providerKey];
       await saveCache(updatedCache);
+      if (!isCurrentLookupGeneration(generation)) {
+        return;
+      }
       currentCache = updatedCache;
       rerenderCurrentResultsOnly();
       setStatus(`${providerLabel} URL no longer works. Search again to refresh it.`, "error");
@@ -4215,8 +4394,7 @@ async function handleProviderRefresh(providerKey: ProviderKey): Promise<void> {
       refreshedMetadata = extractAtsumaruProviderPageMetadataFromDocument(document);
       break;
     case "mangadex":
-      refreshedMetadata = (await fetchMangaDexProviderPageMetadata(currentResult.url, "series"))
-        ?? extractGenericProviderPageMetadataFromDocument(providerKey, document);
+      refreshedMetadata = await fetchMangaDexProviderPageMetadata(currentResult.url, "series");
       break;
     case "mangafire":
       refreshedMetadata = extractMangaFireProviderPageMetadataFromDocument(currentResult.url, document);
@@ -4228,6 +4406,9 @@ async function handleProviderRefresh(providerKey: ProviderKey): Promise<void> {
       refreshedMetadata = extractGenericProviderPageMetadataFromDocument(providerKey, document);
       break;
   }
+  if (!isCurrentLookupGeneration(generation) || !currentCache) {
+    return;
+  }
 
   let latestChapterNumber = currentResult.latestChapterNumber;
   let latestChapterLanguage = currentResult.latestChapterLanguage;
@@ -4236,6 +4417,9 @@ async function handleProviderRefresh(providerKey: ProviderKey): Promise<void> {
     const mangaId = getAtsumaruMangaIdFromUrl(currentResult.url);
     if (mangaId) {
       const latestChapterOutcome = await fetchAtsumaruLatestChapterNumber(mangaId);
+      if (!isCurrentLookupGeneration(generation) || !currentCache) {
+        return;
+      }
       if (latestChapterOutcome.kind !== "found") {
         currentProviderSearchOutcomes.atsu = retypeProviderOutcome(latestChapterOutcome);
         showProviderSearchOutcome(providerLabel, retypeProviderOutcome(latestChapterOutcome));
@@ -4248,6 +4432,9 @@ async function handleProviderRefresh(providerKey: ProviderKey): Promise<void> {
     const mangaId = getMangaDexMangaIdFromUrl(currentResult.url);
     if (mangaId) {
       const latestEnglishChapterOutcome = await fetchMangaDexLatestEnglishChapterInfo(mangaId);
+      if (!isCurrentLookupGeneration(generation) || !currentCache) {
+        return;
+      }
       if (latestEnglishChapterOutcome.kind !== "found") {
         currentProviderSearchOutcomes.mangadex = retypeProviderOutcome(latestEnglishChapterOutcome);
         setStatus(latestEnglishChapterOutcome.message ?? "MangaDex chapter status is unavailable", "error");
@@ -4259,7 +4446,9 @@ async function handleProviderRefresh(providerKey: ProviderKey): Promise<void> {
     }
   }
 
-  const title = refreshedMetadata?.titles.length ? pickPreferredTitle(refreshedMetadata.titles) : currentResult.title;
+  const title = refreshedMetadata?.titles.length
+    ? providerKey === "mangadex" ? refreshedMetadata.titles[0] : pickPreferredTitle(refreshedMetadata.titles)
+    : currentResult.title;
   const updatedResult: ProviderMatch = {
     ...currentResult,
     title,
@@ -4297,6 +4486,9 @@ async function handleProviderRefresh(providerKey: ProviderKey): Promise<void> {
 
   currentCachedResultFlags[providerKey] = true;
   await saveCache(updatedCache);
+  if (!isCurrentLookupGeneration(generation)) {
+    return;
+  }
   currentCache = updatedCache;
   rerenderCurrentResultsOnly();
   setStatus(changed ? `Updated cached ${providerLabel} result` : `No changes found for ${providerLabel}`, "success");
@@ -4314,7 +4506,15 @@ async function copyLink(providerKey: ProviderKey, url: string, providerLabel: st
   setStatus(`${providerLabel} link copied`, "success");
 }
 
-async function toggleMangaDexPurgedState(): Promise<void> {
+async function toggleMangaDexPurgedState(generation?: number): Promise<void> {
+  if (generation == null) {
+    await queueProviderAction("mangadex", (queuedGeneration) => toggleMangaDexPurgedState(queuedGeneration));
+    return;
+  }
+
+  if (!isCurrentLookupGeneration(generation)) {
+    return;
+  }
   if (!currentCache) {
     return;
   }
@@ -4326,11 +4526,17 @@ async function toggleMangaDexPurgedState(): Promise<void> {
 
   const mangaDexResult = currentResult;
   const mangaDexChapterState = getMangaDexChapterState(mangaDexResult);
-  const baseMangaDexChapterState = mangaDexResult.mangaDexChapterState === "no_chapters_tld" ? "no_chapters_tld" : "purged";
+  const baseMangaDexChapterState = mangaDexResult.mangaDexChapterState ?? "purged";
   let updatedResult: ProviderMatch;
   let statusMessage: string;
 
-  if (mangaDexChapterState === "available" && mangaDexResult.latestChapterNumber) {
+  if (mangaDexChapterState === "available" && !mangaDexResult.latestChapterNumber) {
+    updatedResult = {
+      ...mangaDexResult,
+      manualMangaDexChapterState: "purged",
+    };
+    statusMessage = "MangaDex marked as purged";
+  } else if (mangaDexChapterState === "available" && mangaDexResult.latestChapterNumber) {
     updatedResult = {
       ...mangaDexResult,
       manualPurgedChapterNumber: mangaDexResult.latestChapterNumber,
@@ -4344,7 +4550,7 @@ async function toggleMangaDexPurgedState(): Promise<void> {
       ...mangaDexResult,
       latestChapterNumber: mangaDexResult.manualPurgedChapterNumber ?? null,
       manualPurgedChapterNumber: null,
-      mangaDexChapterState: null,
+      mangaDexChapterState: "available",
       manualMangaDexChapterState: null,
     };
     statusMessage = "MangaDex purge cleared";
@@ -4357,9 +4563,13 @@ async function toggleMangaDexPurgedState(): Promise<void> {
   } else if (mangaDexChapterState === "purged") {
     updatedResult = {
       ...mangaDexResult,
-      manualMangaDexChapterState: baseMangaDexChapterState === "no_chapters_tld" ? null : "no_chapters_tld",
+      manualMangaDexChapterState: baseMangaDexChapterState === "available" || baseMangaDexChapterState === "no_chapters_tld"
+        ? null
+        : "no_chapters_tld",
     };
-    statusMessage = "MangaDex marked as having no translated chapters";
+    statusMessage = baseMangaDexChapterState === "available"
+      ? "MangaDex purge cleared"
+      : "MangaDex marked as having no translated chapters";
   } else {
     return;
   }
@@ -4374,6 +4584,9 @@ async function toggleMangaDexPurgedState(): Promise<void> {
   };
 
   await saveCache(updatedCache);
+  if (!isCurrentLookupGeneration(generation)) {
+    return;
+  }
   currentCache = updatedCache;
   rerenderCurrentResultsOnly();
   setStatus(statusMessage, "success");
@@ -4394,11 +4607,20 @@ async function saveReadLink(providerKey: ProviderKey, url: string, providerLabel
       setStatus("No active MangaBaka series tab available", "error");
       return;
     }
-
-    if (!currentPageContextClient || currentPageContextClient.isDisconnected()) {
-      currentPageContextClient = await PageContextClient.connect(tabId);
+    const cachedSeries = currentCache?.series;
+    if (
+      !cachedSeries
+      || (
+        seriesLocation.seriesId !== cachedSeries.requestedSeriesId
+        && seriesLocation.seriesId !== cachedSeries.id
+      )
+    ) {
+      setStatus("The active MangaBaka series no longer matches this lookup.", "error");
+      return;
     }
-    const result = await currentPageContextClient.setReadLink(seriesLocation.seriesId, url);
+
+    const client = await getPageContextClient(tabId);
+    const result = await client.setReadLink(seriesLocation.seriesId, url);
     if (!result.ok) {
       setStatus("error" in result ? result.error.message : "Unable to save MangaBaka Read Link.", "error");
       return;
@@ -4474,12 +4696,31 @@ async function retryCachedMetadataRefresh(seriesId: string): Promise<void> {
     return;
   }
 
+  const generation = beginLookupGeneration();
+  metadataRefreshInProgress = true;
+  setResetEnabled(false);
+  rerenderCurrentResultsOnly();
   const retryPresentation = getPopupStatusPresentation({ kind: "retry" });
   setStatus(retryPresentation.message, retryPresentation.tone);
   try {
+    await providerActionQueue.catch(() => undefined);
+    if (!isCurrentLookupGeneration(generation)) {
+      return;
+    }
     const refreshedMetadata = await fetchMangaBakaMetadata(currentSourceUrl, seriesId);
+    if (!isCurrentLookupGeneration(generation)) {
+      return;
+    }
     if (shouldInvalidateProviderResults(cachedLookup.series, refreshedMetadata.apiSeries.titles)) {
-      await persistMetadataOnlyInvalidation(refreshedMetadata);
+      await queueCacheMutation(async () => {
+        if (isCurrentLookupGeneration(generation)) {
+          await persistMetadataOnlyInvalidation(refreshedMetadata);
+        }
+      });
+      if (!isCurrentLookupGeneration(generation)) {
+        return;
+      }
+      metadataRefreshInProgress = false;
       await runLookup(
         refreshedMetadata.sourceUrl,
         seriesId,
@@ -4490,35 +4731,84 @@ async function retryCachedMetadataRefresh(seriesId: string): Promise<void> {
       return;
     }
 
-    const refreshedCache: CachedLookup = {
-      ...cachedLookup,
-      series: createCachedSeries(refreshedMetadata),
-    };
-    await saveCache(refreshedCache);
-    currentCache = refreshedCache;
-    renderLookup(refreshedCache, true);
+    await queueCacheMutation(async () => {
+      if (!isCurrentLookupGeneration(generation) || !currentCache) {
+        return;
+      }
+      const refreshedCache: CachedLookup = {
+        ...currentCache,
+        series: createCachedSeries(refreshedMetadata),
+      };
+      await saveCache(refreshedCache);
+      if (isCurrentLookupGeneration(generation)) {
+        currentCache = refreshedCache;
+      }
+    });
+    if (!isCurrentLookupGeneration(generation)) {
+      return;
+    }
+    metadataRefreshInProgress = false;
+    if (currentCache) {
+      renderLookup(currentCache, true);
+    }
     setStatus("MangaBaka metadata refreshed; cached provider results retained", "success");
     wireTopResetButton(seriesId);
   } catch (error) {
+    if (!isCurrentLookupGeneration(generation)) {
+      return;
+    }
     if (error instanceof InvalidMangaBakaPageError) {
-      await clearCache(seriesId);
-      currentCache = null;
+      await queueCacheMutation(async () => {
+        if (!isCurrentLookupGeneration(generation)) {
+          return;
+        }
+        await clearCache(seriesId);
+        if (isCurrentLookupGeneration(generation)) {
+          currentCache = null;
+        }
+      });
+      if (!isCurrentLookupGeneration(generation)) {
+        return;
+      }
+      metadataRefreshInProgress = false;
       await renderInvalidPageState();
       return;
     }
 
-    renderLookup(cachedLookup, true);
+    metadataRefreshInProgress = false;
+    if (currentCache) {
+      renderLookup(currentCache, true);
+    } else {
+      renderLookup(cachedLookup, true);
+    }
     setStatus("Loaded cached API metadata; MangaBaka refresh failed. Retry is available.", "error");
     wireCachedMetadataRetryButton(seriesId);
+  } finally {
+    if (isCurrentLookupGeneration(generation) && metadataRefreshInProgress) {
+      metadataRefreshInProgress = false;
+      if (currentViewState === "lookup") {
+        rerenderCurrentResultsOnly();
+      }
+    }
   }
 }
 
 async function handleTopReset(seriesId: string): Promise<void> {
+  const generation = invalidateLookupGeneration();
+  metadataRefreshInProgress = false;
+  setResetEnabled(false);
   const resetPresentation = getPopupStatusPresentation({ kind: "reset" });
   setStatus(resetPresentation.message, resetPresentation.tone);
-  await clearCache(seriesId);
   currentCache = null;
   currentCachedResultFlags = {};
+  await queueCacheMutation(async () => {
+    if (isCurrentLookupGeneration(generation)) {
+      await clearCache(seriesId);
+    }
+  });
+  if (!isCurrentLookupGeneration(generation)) {
+    return;
+  }
 
   if (!currentSourceUrl) {
     await renderUnsupportedState();
@@ -4528,7 +4818,15 @@ async function handleTopReset(seriesId: string): Promise<void> {
   await runLookup(currentSourceUrl, seriesId, createEmptyRejectedProviderUrls(), { ...EMPTY_TITLE_ATTEMPT_INDEXES });
 }
 
-async function handleProviderReset(providerKey: ProviderKey): Promise<void> {
+async function handleProviderReset(providerKey: ProviderKey, generation?: number): Promise<void> {
+  if (generation == null) {
+    await queueProviderAction(providerKey, (queuedGeneration) => handleProviderReset(providerKey, queuedGeneration));
+    return;
+  }
+
+  if (!isCurrentLookupGeneration(generation)) {
+    return;
+  }
   if (!currentCache) {
     return;
   }
@@ -4552,6 +4850,9 @@ async function handleProviderReset(providerKey: ProviderKey): Promise<void> {
     const titleAttemptIndexes = { ...currentCache.titleAttemptIndexes };
     const attemptedTitleCursor = titleAttemptIndexes[providerKey] ?? 0;
     const outcome = await searchProviderOutcome(providerKey, metadata, rejectedUrls, titleAttemptIndexes);
+    if (!isCurrentLookupGeneration(generation) || !currentCache) {
+      return;
+    }
     currentProviderSearchOutcomes[providerKey] = outcome;
     const transition = transitionProviderSearch(
       {
@@ -4586,11 +4887,17 @@ async function handleProviderReset(providerKey: ProviderKey): Promise<void> {
     };
 
     await saveCache(updatedCache);
+    if (!isCurrentLookupGeneration(generation)) {
+      return;
+    }
     currentCachedResultFlags[providerKey] = false;
     currentCache = updatedCache;
     renderLookup(updatedCache, false);
     showProviderSearchOutcome(providerLabel, outcome);
   } catch (error) {
+    if (!isCurrentLookupGeneration(generation) || !currentCache) {
+      return;
+    }
     currentCache = {
       ...currentCache,
       searchedAt: new Date().toISOString(),
@@ -4600,7 +4907,15 @@ async function handleProviderReset(providerKey: ProviderKey): Promise<void> {
   }
 }
 
-async function handleProviderRetry(providerKey: ProviderKey): Promise<void> {
+async function handleProviderRetry(providerKey: ProviderKey, generation?: number): Promise<void> {
+  if (generation == null) {
+    await queueProviderAction(providerKey, (queuedGeneration) => handleProviderRetry(providerKey, queuedGeneration));
+    return;
+  }
+
+  if (!isCurrentLookupGeneration(generation)) {
+    return;
+  }
   if (!currentCache) {
     return;
   }
@@ -4622,12 +4937,15 @@ async function handleProviderRetry(providerKey: ProviderKey): Promise<void> {
   rerenderCurrentResultsOnly();
 
   try {
-    while (currentCache && nextTitleIndex < titleCount) {
+    while (currentCache && isCurrentLookupGeneration(generation) && nextTitleIndex < titleCount) {
       const cacheBeforeAttempt = currentCache;
       const titleAttemptIndexes = { ...currentCache.titleAttemptIndexes, [providerKey]: nextTitleIndex };
       setStatus(`Trying ${providerLabel} title ${nextTitleIndex + 1} of ${titleCount}...`, "loading");
 
       const outcome = await searchProviderOutcome(providerKey, metadata, currentCache.rejectedUrls, titleAttemptIndexes);
+      if (!isCurrentLookupGeneration(generation) || !currentCache) {
+        return;
+      }
       currentProviderSearchOutcomes[providerKey] = outcome;
       const transition = transitionProviderSearch(
         {
@@ -4661,6 +4979,9 @@ async function handleProviderRetry(providerKey: ProviderKey): Promise<void> {
       };
 
       await saveCache(updatedCache);
+      if (!isCurrentLookupGeneration(generation)) {
+        return;
+      }
       currentCachedResultFlags[providerKey] = false;
       currentCache = updatedCache;
       rerenderCurrentResultsOnly();
@@ -4681,6 +5002,9 @@ async function handleProviderRetry(providerKey: ProviderKey): Promise<void> {
         rerenderCurrentResultsOnly();
         setStatus(`Rate limit cooldown: retrying ${providerLabel} in ${countdown}s`, "loading");
         await sleep(1000);
+        if (!isCurrentLookupGeneration(generation)) {
+          return;
+        }
       }
 
       delete retryCountdowns[providerKey];
@@ -4693,7 +5017,15 @@ async function handleProviderRetry(providerKey: ProviderKey): Promise<void> {
   }
 }
 
-async function handleProviderSearchNow(providerKey: ProviderKey): Promise<void> {
+async function handleProviderSearchNow(providerKey: ProviderKey, generation?: number): Promise<void> {
+  if (generation == null) {
+    await queueProviderAction(providerKey, (queuedGeneration) => handleProviderSearchNow(providerKey, queuedGeneration));
+    return;
+  }
+
+  if (!isCurrentLookupGeneration(generation)) {
+    return;
+  }
   if (!currentCache) {
     return;
   }
@@ -4712,6 +5044,9 @@ async function handleProviderSearchNow(providerKey: ProviderKey): Promise<void> 
       currentCache.rejectedUrls,
       currentCache.titleAttemptIndexes,
     );
+    if (!isCurrentLookupGeneration(generation) || !currentCache) {
+      return;
+    }
     currentProviderSearchOutcomes[providerKey] = outcome;
     const transition = transitionProviderSearch(
       {
@@ -4745,11 +5080,17 @@ async function handleProviderSearchNow(providerKey: ProviderKey): Promise<void> 
     };
 
     await saveCache(updatedCache);
+    if (!isCurrentLookupGeneration(generation)) {
+      return;
+    }
     currentCachedResultFlags[providerKey] = false;
     currentCache = updatedCache;
     renderLookup(updatedCache, false);
     showProviderSearchOutcome(providerLabel, outcome);
   } catch (error) {
+    if (!isCurrentLookupGeneration(generation) || !currentCache) {
+      return;
+    }
     renderLookup(currentCache, true);
     setStatus(error instanceof Error ? error.message : `Unable to search ${providerLabel}`, "error");
   }
@@ -4986,6 +5327,18 @@ function getSearchLinkTypeSelect(): HTMLSelectElement {
 
 function getProviderLinkTypeSelect(): HTMLSelectElement {
   return document.getElementById("option-provider-link-type") as HTMLSelectElement;
+}
+
+function getContextMenuModeSelect(): HTMLSelectElement {
+  return document.getElementById("option-context-menu-mode") as HTMLSelectElement;
+}
+
+function getContextMenuLinkTypeSelect(): HTMLSelectElement {
+  return document.getElementById("option-context-menu-link-type") as HTMLSelectElement;
+}
+
+function getContextMenuLinkTypeRow(): HTMLLabelElement {
+  return document.getElementById("option-context-menu-link-type-row") as HTMLLabelElement;
 }
 
 function getMangaBakaButtonTargetSelect(): HTMLSelectElement {

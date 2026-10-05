@@ -19,7 +19,7 @@ const BASE_HOST_PERMISSIONS = [
 ];
 
 const LOCAL_RELEASE_UPDATE_HOST_PERMISSIONS = ["https://api.github.com/*"];
-const BASE_PERMISSIONS = ["storage", "tabs", "scripting"];
+const BASE_PERMISSIONS = ["storage", "tabs", "scripting", "contextMenus"];
 
 const ADULT_HOST_PERMISSIONS = [
   "https://e-hentai.org/*",

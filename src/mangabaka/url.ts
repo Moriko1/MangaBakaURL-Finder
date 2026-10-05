@@ -47,7 +47,9 @@ export function parseMangaBakaSeriesUrl(input: string | URL): MangaBakaSeriesLoc
       : { seriesId, mediaType: null, slug: null, isLegacy: true };
   }
 
-  const canonicalMatch = url.pathname.match(/^\/([^/]+)\/([1-9]\d*)(?:\/([^/]+))?\/?$/);
+  // These tabs retain the series heading and library controls. Editing/report
+  // routes deliberately remain outside the lookup and Read Link contract.
+  const canonicalMatch = url.pathname.match(/^\/([^/]+)\/([1-9]\d*)(?:\/([^/]+))?(?:\/(?:covers|related|news|collections|works))?\/?$/);
   if (!canonicalMatch || !isMangaMediaType(canonicalMatch[1])) {
     return null;
   }
@@ -82,6 +84,17 @@ export function isMangaBakaSeriesUrl(input: string | URL): boolean {
   return parseMangaBakaSeriesUrl(input) !== null;
 }
 
+export function getMangaBakaSeriesRootUrl(input: string | URL): string | null {
+  if (!parseMangaBakaSeriesUrl(input)) {
+    return null;
+  }
+  const url = parseUrl(input)!;
+  url.pathname = `/${url.pathname.split("/").filter(Boolean).slice(0, 3).join("/")}`;
+  url.search = "";
+  url.hash = "";
+  return url.href;
+}
+
 export function isMangaBakaPageUrl(input: string | URL): boolean {
   const url = parseUrl(input);
   return Boolean(
@@ -105,6 +118,7 @@ export function validateCanonicalMangaBakaSeriesUrl(
     location.isLegacy ||
     !location.mediaType ||
     !location.slug ||
+    parseUrl(input)!.pathname.split("/").filter(Boolean).length !== 3 ||
     (expectedSeriesId !== undefined && location.seriesId !== expectedSeriesId) ||
     (expectedMediaType !== undefined && location.mediaType !== expectedMediaType)
   ) {

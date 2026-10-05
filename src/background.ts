@@ -1,14 +1,13 @@
-import { isMangaBakaPageUrl } from "./mangabaka/url";
+import { isActionActiveForUrl } from "./background/action-state";
 import { runExtensionInstallMigrations } from "./background/install";
+import { createContextMenuController } from "./background/context-menu";
 import { createReleaseUpdateController, RELEASE_UPDATE_ALARM_NAME } from "./release/update";
+import { loadSettings, SETTINGS_KEY } from "./settings";
 
-declare const __ADULT_PROVIDERS_ENABLED__: boolean;
 declare const __LOCAL_RELEASE_UPDATES_ENABLED__: boolean;
 
-type BackgroundProviderKey = "atsu" | "mangadex" | "mangafire" | "weebcentral" | "ehentai" | "exhentai" | "comixto";
-
 type BackgroundMessage =
-  | { protocolVersion: 1; type: "action:sync"; tabId: number; url?: string }
+  | { protocolVersion: 1; type: "action:sync"; tabId?: number; url?: string }
   | { protocolVersion: 1; type: "release:ensure" };
 
 // noinspection JSUnusedGlobalSymbols
@@ -26,15 +25,9 @@ const INACTIVE_ICON_ASSET_PATHS: Record<string, string> = {
   "128": "assets/icon-gray-128.png",
 };
 
-const BACKGROUND_SETTINGS_KEY = "extension:settings";
-const BACKGROUND_DEFAULT_ENABLED_PROVIDERS = {
-  atsu: true,
-  mangadex: true,
-  comixto: false,
-  mangafire: false,
-  weebcentral: false,
-  ...(__ADULT_PROVIDERS_ENABLED__ ? { ehentai: false, exhentai: false } : {}),
-} as Record<BackgroundProviderKey, boolean>;
+let activeIconImageDataPromise: Promise<Record<number, ImageData>> | null = null;
+let inactiveIconImageDataPromise: Promise<Record<number, ImageData>> | null = null;
+
 const BACKGROUND_MANIFEST = chrome.runtime.getManifest();
 const releaseUpdates = __LOCAL_RELEASE_UPDATES_ENABLED__
   ? createReleaseUpdateController({
@@ -46,27 +39,39 @@ const releaseUpdates = __LOCAL_RELEASE_UPDATES_ENABLED__
     })
   : null;
 
-let activeIconImageDataPromise: Promise<Record<number, ImageData>> | null = null;
-let inactiveIconImageDataPromise: Promise<Record<number, ImageData>> | null = null;
-let enabledProvidersPromise: Promise<typeof BACKGROUND_DEFAULT_ENABLED_PROVIDERS> | null = null;
+const contextMenusApi = chrome.contextMenus as typeof chrome.contextMenus | undefined;
+const contextMenuController = contextMenusApi
+  ? createContextMenuController({
+      contextMenus: contextMenusApi,
+      tabs: chrome.tabs,
+      loadSettings: () => loadSettings(chrome.storage.local),
+      getLastErrorMessage: () => chrome.runtime.lastError?.message ?? null,
+    })
+  : null;
+
 let nextActionUpdateGeneration = 0;
+let nextActionRefreshSweepGeneration = 0;
+let currentActionRefreshSweepGeneration = 0;
 
 const actionUpdateGenerations = new Map<number, number>();
 const appliedActionStates = new Map<number, boolean>();
 const actionWriteQueues = new Map<number, Promise<void>>();
+const TRANSIENT_TAB_RETRY_DELAY_MS = 50;
 
 function runBackgroundTask(description: string, task: () => Promise<unknown>): void {
-  void Promise.resolve()
-    .then(task)
-    .catch((error) => {
+  try {
+    void task().catch((error) => {
       console.warn(`Failed to ${description}.`, error);
     });
+  } catch (error) {
+    console.warn(`Failed to ${description}.`, error);
+  }
 }
 
 async function loadIconImageData(path: string, size: number): Promise<ImageData> {
   const response = await fetch(chrome.runtime.getURL(path));
   if (!response.ok) {
-    throw new Error(`Failed to load icon asset: ${path}`);
+    throw new Error(`Failed to load action icon asset: ${path}`);
   }
 
   const bitmap = await createImageBitmap(await response.blob());
@@ -74,7 +79,7 @@ async function loadIconImageData(path: string, size: number): Promise<ImageData>
     const canvas = new OffscreenCanvas(size, size);
     const context = canvas.getContext("2d");
     if (!context) {
-      throw new Error("Unable to create icon canvas context.");
+      throw new Error("Unable to create the action icon canvas context.");
     }
 
     context.clearRect(0, 0, size, size);
@@ -87,7 +92,10 @@ async function loadIconImageData(path: string, size: number): Promise<ImageData>
 
 async function loadIconSet(assetPaths: Record<string, string>): Promise<Record<number, ImageData>> {
   const iconEntries = await Promise.all(
-    Object.entries(assetPaths).map(async ([size, path]) => [Number(size), await loadIconImageData(path, Number(size))] as const),
+    Object.entries(assetPaths).map(async ([size, path]) => [
+      Number(size),
+      await loadIconImageData(path, Number(size)),
+    ] as const),
   );
   return Object.fromEntries(iconEntries) as Record<number, ImageData>;
 }
@@ -108,74 +116,56 @@ function getActionIconImageData(isActive: boolean): Promise<Record<number, Image
   return inactiveIconImageDataPromise;
 }
 
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error
+    ? error.message
+    : typeof error === "string"
+      ? error
+      : error && typeof error === "object" && "message" in error && typeof error.message === "string"
+        ? error.message
+        : "";
+}
+
 function isMissingTabError(error: unknown): boolean {
-  return error instanceof Error && /No tab with id|Tabs cannot be edited right now|tab was closed/i.test(error.message);
+  return /No tab with id|Invalid tab ID|tab was closed/i.test(getErrorMessage(error));
 }
 
-function getProviderKeyForUrl(url?: string): BackgroundProviderKey | null {
-  if (!url) {
-    return null;
-  }
+function isTransientTabEditError(error: unknown): boolean {
+  return /Tabs cannot be edited right now/i.test(getErrorMessage(error));
+}
 
+type TabOperationResult<T> =
+  | { status: "completed"; value: T }
+  | { status: "stale" };
+
+async function runTabOperationWithRetry<T>(
+  tabId: number,
+  generation: number,
+  operation: () => Promise<T>,
+): Promise<TabOperationResult<T>> {
   try {
-    const parsedUrl = new URL(url);
-    switch (parsedUrl.hostname) {
-      case "atsu.moe":
-        return "atsu";
-      case "mangadex.org":
-        return "mangadex";
-      case "mangafire.to":
-        return "mangafire";
-      case "weebcentral.com":
-        return "weebcentral";
-      default:
-        if (__ADULT_PROVIDERS_ENABLED__) {
-          if (parsedUrl.hostname === "e-hentai.org") {
-            return "ehentai";
-          }
-          if (parsedUrl.hostname === "exhentai.org") {
-            return "exhentai";
-          }
-        }
-        return null;
-    }
-  } catch {
-    return null;
-  }
-}
-
-function loadEnabledProviders(): Promise<typeof BACKGROUND_DEFAULT_ENABLED_PROVIDERS> {
-  if (enabledProvidersPromise) {
-    return enabledProvidersPromise;
-  }
-
-  const loadPromise = chrome.storage.local.get(BACKGROUND_SETTINGS_KEY)
-    .then((stored) => {
-      const settings =
-        stored[BACKGROUND_SETTINGS_KEY] as { enabledProviders?: Partial<typeof BACKGROUND_DEFAULT_ENABLED_PROVIDERS> } | undefined;
-      return {
-        ...BACKGROUND_DEFAULT_ENABLED_PROVIDERS,
-        ...settings?.enabledProviders,
-        comixto: false,
-      };
-    });
-  const cachedPromise = loadPromise.catch((error) => {
-      if (enabledProvidersPromise === cachedPromise) {
-        enabledProvidersPromise = null;
-      }
+    return { status: "completed", value: await operation() };
+  } catch (error) {
+    if (!isTransientTabEditError(error)) {
       throw error;
-    });
-  enabledProvidersPromise = cachedPromise;
-  return cachedPromise;
+    }
+
+    await new Promise<void>((resolve) => setTimeout(resolve, TRANSIENT_TAB_RETRY_DELAY_MS));
+    if (!isCurrentActionUpdate(tabId, generation)) {
+      return { status: "stale" };
+    }
+    return { status: "completed", value: await operation() };
+  }
 }
 
-function invalidateEnabledProviders(): void {
-  enabledProvidersPromise = null;
-}
-
-function beginActionUpdate(tabId: number): number {
+function beginActionUpdate(tabId: number, force = false): number {
   const generation = ++nextActionUpdateGeneration;
   actionUpdateGenerations.set(tabId, generation);
+  if (force) {
+    // Lifecycle events deliberately reapply an equal logical state so a
+    // missed earlier event or extension reload cannot leave a stale icon.
+    appliedActionStates.delete(tabId);
+  }
   return generation;
 }
 
@@ -193,11 +183,6 @@ async function applyActionState(tabId: number, generation: number, isActive: boo
     return;
   }
 
-  const imageData = await getActionIconImageData(isActive);
-  if (!isCurrentActionUpdate(tabId, generation) || appliedActionStates.get(tabId) === isActive) {
-    return;
-  }
-
   const previousWrite = actionWriteQueues.get(tabId) ?? Promise.resolve();
   const write = previousWrite.catch(() => undefined).then(async () => {
     if (!isCurrentActionUpdate(tabId, generation) || appliedActionStates.get(tabId) === isActive) {
@@ -205,37 +190,57 @@ async function applyActionState(tabId: number, generation: number, isActive: boo
     }
 
     let iconApplied = false;
-    try {
-      await chrome.action.setIcon({ tabId, imageData });
-      iconApplied = true;
-    } catch (error) {
-      if (isMissingTabError(error)) {
-        if (isCurrentActionUpdate(tabId, generation)) {
-          forgetActionStateForTab(tabId);
-        }
-        return;
-      }
-
-      console.warn("Failed to update the action icon from image data. Falling back to asset paths.", error);
-      if (!isCurrentActionUpdate(tabId, generation)) {
-        return;
-      }
-
+    if (typeof createImageBitmap === "function" && typeof OffscreenCanvas === "function") {
       try {
-        await chrome.action.setIcon({
+        const imageData = await getActionIconImageData(isActive);
+        if (!isCurrentActionUpdate(tabId, generation)) {
+          return;
+        }
+
+        const iconResult = await runTabOperationWithRetry(
           tabId,
-          path: isActive ? ACTIVE_ICON_ASSET_PATHS : INACTIVE_ICON_ASSET_PATHS,
-        });
+          generation,
+          () => chrome.action.setIcon({ tabId, imageData }),
+        );
+        if (iconResult.status === "stale") {
+          return;
+        }
         iconApplied = true;
-      } catch (fallbackError) {
-        if (isMissingTabError(fallbackError)) {
+      } catch (error) {
+        if (isMissingTabError(error)) {
           if (isCurrentActionUpdate(tabId, generation)) {
             forgetActionStateForTab(tabId);
           }
           return;
         }
 
-        console.warn("Failed to update the action icon from asset paths.", fallbackError);
+        console.warn("Failed to update the action icon from image data. Falling back to asset paths.", error);
+      }
+    }
+
+    if (!iconApplied && isCurrentActionUpdate(tabId, generation)) {
+      try {
+        const iconResult = await runTabOperationWithRetry(
+          tabId,
+          generation,
+          () => chrome.action.setIcon({
+            tabId,
+            path: isActive ? ACTIVE_ICON_ASSET_PATHS : INACTIVE_ICON_ASSET_PATHS,
+          }),
+        );
+        if (iconResult.status === "stale") {
+          return;
+        }
+        iconApplied = true;
+      } catch (error) {
+        if (isMissingTabError(error)) {
+          if (isCurrentActionUpdate(tabId, generation)) {
+            forgetActionStateForTab(tabId);
+          }
+          return;
+        }
+
+        console.warn("Failed to update the action icon from asset paths.", error);
       }
     }
 
@@ -245,10 +250,17 @@ async function applyActionState(tabId: number, generation: number, isActive: boo
 
     let titleApplied = false;
     try {
-      await chrome.action.setTitle({
+      const titleResult = await runTabOperationWithRetry(
         tabId,
-        title: isActive ? "MangaBaka URL Finder" : "MangaBaka URL Finder (inactive on this page)",
-      });
+        generation,
+        () => chrome.action.setTitle({
+          tabId,
+          title: isActive ? "MangaBaka URL Finder" : "MangaBaka URL Finder (inactive on this page)",
+        }),
+      );
+      if (titleResult.status === "stale") {
+        return;
+      }
       titleApplied = true;
     } catch (error) {
       if (isMissingTabError(error)) {
@@ -280,31 +292,25 @@ async function updateActionForTabAtGeneration(
   tabId: number,
   url: string | undefined,
   generation: number,
-  enabledProviders?: typeof BACKGROUND_DEFAULT_ENABLED_PROVIDERS,
 ): Promise<void> {
-  const providers = enabledProviders ?? await loadEnabledProviders();
   if (!isCurrentActionUpdate(tabId, generation)) {
     return;
   }
 
-  const providerKey = getProviderKeyForUrl(url);
-  const isActive = Boolean(url && isMangaBakaPageUrl(url)) || (providerKey != null && providers[providerKey]);
+  const isActive = isActionActiveForUrl(url);
   await applyActionState(tabId, generation, isActive);
 }
 
-function updateActionForTab(
+async function updateActionForCurrentTabAtGeneration(
   tabId: number,
-  url: string | undefined,
-  enabledProviders?: typeof BACKGROUND_DEFAULT_ENABLED_PROVIDERS,
+  generation: number,
 ): Promise<void> {
-  return updateActionForTabAtGeneration(tabId, url, beginActionUpdate(tabId), enabledProviders);
-}
-
-async function updateActionForCurrentTab(tabId: number): Promise<void> {
-  const generation = beginActionUpdate(tabId);
   try {
-    const tab = await chrome.tabs.get(tabId);
-    await updateActionForTabAtGeneration(tabId, tab.url, generation);
+    const tabResult = await runTabOperationWithRetry(tabId, generation, () => chrome.tabs.get(tabId));
+    if (tabResult.status === "stale") {
+      return;
+    }
+    await updateActionForTabAtGeneration(tabId, tabResult.value.pendingUrl ?? tabResult.value.url, generation);
   } catch (error) {
     if (!isMissingTabError(error)) {
       throw error;
@@ -316,19 +322,36 @@ async function updateActionForCurrentTab(tabId: number): Promise<void> {
   }
 }
 
+function updateActionForCurrentTab(
+  tabId: number,
+  force = false,
+): Promise<void> {
+  return updateActionForCurrentTabAtGeneration(
+    tabId,
+    beginActionUpdate(tabId, force),
+  );
+}
+
 async function refreshAllTabs(): Promise<void> {
-  const enabledProviders = await loadEnabledProviders();
+  const sweepGeneration = ++nextActionRefreshSweepGeneration;
+  currentActionRefreshSweepGeneration = sweepGeneration;
   const tabs = await chrome.tabs.query({});
+  if (currentActionRefreshSweepGeneration !== sweepGeneration) {
+    return;
+  }
   await Promise.all(
     tabs
       .filter((tab: { id?: number }) => typeof tab.id === "number")
-      .map((tab: { id?: number; url?: string }) => updateActionForTab(tab.id as number, tab.url, enabledProviders)),
+      .map((tab: { id?: number }) => updateActionForCurrentTab(tab.id as number, true)),
   );
 }
 
 // noinspection JSDeprecatedSymbols
 chrome.runtime.onInstalled.addListener((details) => {
   runBackgroundTask("refresh action states after extension installation", refreshAllTabs);
+  if (contextMenuController) {
+    runBackgroundTask("synchronize context menus after extension installation", () => contextMenuController.sync());
+  }
   if (releaseUpdates) {
     runBackgroundTask("sync the release-update schedule after extension installation", () => releaseUpdates.syncSchedule());
   }
@@ -341,6 +364,9 @@ chrome.runtime.onInstalled.addListener((details) => {
 // noinspection JSDeprecatedSymbols
 chrome.runtime.onStartup.addListener(() => {
   runBackgroundTask("refresh action states during browser startup", refreshAllTabs);
+  if (contextMenuController) {
+    runBackgroundTask("synchronize context menus during browser startup", () => contextMenuController.sync());
+  }
   if (releaseUpdates) {
     runBackgroundTask("sync the release-update schedule during browser startup", () => releaseUpdates.syncSchedule());
   }
@@ -348,13 +374,41 @@ chrome.runtime.onStartup.addListener(() => {
 
 // noinspection JSDeprecatedSymbols
 chrome.tabs.onActivated.addListener(({ tabId }: { tabId: number }) => {
-  runBackgroundTask("refresh the activated tab action state", () => updateActionForCurrentTab(tabId));
+  const generation = beginActionUpdate(tabId, true);
+  runBackgroundTask(
+    "refresh the activated tab action state",
+    () => updateActionForCurrentTabAtGeneration(tabId, generation),
+  );
 });
 
 // noinspection JSDeprecatedSymbols
-chrome.tabs.onUpdated.addListener((tabId: number, changeInfo: { url?: string; status?: string }, tab: { url?: string }) => {
+chrome.tabs.onUpdated.addListener((
+  tabId: number,
+  changeInfo: { url?: string; status?: string },
+  tab: { pendingUrl?: string; url?: string },
+) => {
   if (changeInfo.url || changeInfo.status === "complete") {
-    runBackgroundTask("refresh an updated tab action state", () => updateActionForTab(tabId, changeInfo.url ?? tab.url));
+    const generation = beginActionUpdate(tabId, true);
+    runBackgroundTask(
+      "refresh an updated tab action state",
+      () => updateActionForTabAtGeneration(
+        tabId,
+        changeInfo.url ?? tab.pendingUrl ?? tab.url,
+        generation,
+      ),
+    );
+    return;
+  }
+
+  if (changeInfo.status === "loading") {
+    // Chrome can reset tab-specific action properties during navigation. Do
+    // not leave the tab without a replacement state while waiting for a
+    // completion event that may never arrive after an interrupted load.
+    const generation = beginActionUpdate(tabId, true);
+    runBackgroundTask(
+      "refresh a loading tab action state",
+      () => updateActionForTabAtGeneration(tabId, tab.pendingUrl ?? tab.url, generation),
+    );
   }
 });
 
@@ -364,11 +418,27 @@ chrome.tabs.onRemoved.addListener((tabId: number) => {
 });
 
 // noinspection JSDeprecatedSymbols
+(chrome.tabs.onReplaced as typeof chrome.tabs.onReplaced | undefined)?.addListener((addedTabId: number, removedTabId: number) => {
+  forgetActionStateForTab(removedTabId);
+  const generation = beginActionUpdate(addedTabId, true);
+  runBackgroundTask(
+    "refresh a replaced tab action state",
+    () => updateActionForCurrentTabAtGeneration(addedTabId, generation),
+  );
+});
+
+// noinspection JSDeprecatedSymbols
 chrome.storage.onChanged.addListener((changes: Record<string, { newValue?: unknown }>, areaName: string) => {
-  if (areaName === "local" && BACKGROUND_SETTINGS_KEY in changes) {
-    invalidateEnabledProviders();
-    runBackgroundTask("refresh action states after a settings change", refreshAllTabs);
+  if (areaName === "local" && SETTINGS_KEY in changes) {
+    if (contextMenuController) {
+      runBackgroundTask("synchronize context menus after a settings change", () => contextMenuController.sync());
+    }
   }
+});
+
+// noinspection JSDeprecatedSymbols
+contextMenusApi?.onClicked.addListener((info, tab) => {
+  void contextMenuController?.handleClick(info, tab);
 });
 
 if (__LOCAL_RELEASE_UPDATES_ENABLED__ && releaseUpdates) {
@@ -381,7 +451,7 @@ if (__LOCAL_RELEASE_UPDATES_ENABLED__ && releaseUpdates) {
 }
 
 // noinspection JSDeprecatedSymbols
-chrome.runtime.onMessage.addListener((rawMessage: unknown) => {
+chrome.runtime.onMessage.addListener((rawMessage: unknown, sender: chrome.runtime.MessageSender) => {
   if (!rawMessage || typeof rawMessage !== "object") {
     return;
   }
@@ -391,8 +461,18 @@ chrome.runtime.onMessage.addListener((rawMessage: unknown) => {
     return;
   }
 
-  if (message.type === "action:sync" && typeof message.tabId === "number") {
-    runBackgroundTask("refresh the requested tab action state", () => updateActionForCurrentTab(message.tabId as number));
+  if (message.type === "action:sync") {
+    // A content script is authoritative only for its own tab. Extension pages
+    // such as the popup have no sender.tab and therefore provide the target id.
+    const tabId = typeof sender?.tab?.id === "number" ? sender.tab.id : message.tabId;
+    if (typeof tabId !== "number") {
+      return;
+    }
+    const generation = beginActionUpdate(tabId, true);
+    runBackgroundTask(
+      "refresh the requested tab action state",
+      () => updateActionForCurrentTabAtGeneration(tabId, generation),
+    );
     return;
   }
 
@@ -400,3 +480,10 @@ chrome.runtime.onMessage.addListener((rawMessage: unknown) => {
     runBackgroundTask("ensure the release-update status", () => releaseUpdates.ensureStatus());
   }
 });
+
+// A development reload can replace the worker while supported pages remain
+// open. Reconcile those tabs as soon as the real extension worker evaluates,
+// instead of waiting for the next navigation or activation event.
+if (chrome.runtime.id) {
+  runBackgroundTask("refresh action states when the background worker starts", refreshAllTabs);
+}

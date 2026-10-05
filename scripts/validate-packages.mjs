@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { extname, relative, resolve } from "node:path";
 import process from "node:process";
-import { getVariantPackageDirectoryName, VARIANTS } from "./variant-utils.mjs";
+import { getVariantConfig, getVariantPackageDirectoryName, VARIANTS } from "./variant-utils.mjs";
 
 const root = process.cwd();
 const packageVersion = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")).version;
@@ -9,6 +9,7 @@ const requiredDistFiles = ["background.js", "build-info.js", "content.js", "popu
 const forbiddenEverywhere = [/search\.yahoo\.com/i];
 const forbiddenInStoreBuilds = [/e-?hentai/i, /exhentai/i];
 const textExtensions = new Set([".css", ".html", ".js", ".json", ".svg", ".txt"]);
+const toolbarIconSizes = ["16", "32", "48", "128"];
 
 function assert(condition, message) {
   if (!condition) {
@@ -31,6 +32,7 @@ function collectFiles(directory) {
 }
 
 for (const variant of VARIANTS) {
+  const variantConfig = getVariantConfig(variant);
   const packageRoot = resolve(root, getVariantPackageDirectoryName(variant));
   assert(existsSync(packageRoot), `${variant}: package directory is missing.`);
 
@@ -39,6 +41,19 @@ for (const variant of VARIANTS) {
   assert(manifest.version === packageVersion, `${variant}: manifest version does not match package.json.`);
   assert(manifest.version_name === `${packageVersion} (${variant === "complete" ? "Complete" : variant === "google" ? "Google" : "Firefox"})`, `${variant}: version_name is incorrect.`);
   assert(!manifest.web_accessible_resources, `${variant}: internal action icons must not be exposed to websites.`);
+  for (const size of toolbarIconSizes) {
+    const colorIconPath = `assets/icon-color-${size}.png`;
+    const grayIconPath = `assets/icon-gray-${size}.png`;
+    assert(manifest.icons?.[size] === colorIconPath, `${variant}: colored ${size}px extension icon is incorrect.`);
+    assert(manifest.action?.default_icon?.[size] === grayIconPath, `${variant}: gray ${size}px action default is incorrect.`);
+    assert(existsSync(resolve(packageRoot, colorIconPath)), `${variant}: ${colorIconPath} is missing.`);
+    assert(existsSync(resolve(packageRoot, grayIconPath)), `${variant}: ${grayIconPath} is missing.`);
+  }
+  assert(manifest.permissions.includes("contextMenus"), `${variant}: context-menu permission is missing.`);
+  assert(
+    JSON.stringify(manifest.permissions) === JSON.stringify(variantConfig.permissions),
+    `${variant}: manifest permissions do not match the declarative variant configuration.`,
+  );
   assert(manifest.host_permissions.includes("https://api.mangabaka.org/*"), `${variant}: MangaBaka API permission is missing.`);
   assert(!manifest.host_permissions.includes("https://search.yahoo.com/*"), `${variant}: Yahoo permission must not be present.`);
   if (variant === "complete") {

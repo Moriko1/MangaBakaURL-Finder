@@ -6,6 +6,7 @@ import type {
   ProviderSearchRequest,
 } from "./types";
 import { providerFound, providerInvalidResponse, providerNoMatch } from "./types";
+import { buildAtsumaruManualSearchUrl } from "./manual-search";
 import { canonicalHttpsUrl, dedupeStrings, getPathSegments, parseHttpUrl } from "./url";
 
 const ATSUMARU_HOSTNAME = "atsu.moe";
@@ -191,13 +192,21 @@ export function parseAtsumaruLatestChapterResponse(body: string): ProviderOutcom
     return providerInvalidResponse("atsu", "Atsumaru manga-page response had an invalid chapter collection");
   }
 
-  const chapters = (Array.isArray(rawChapters) ? rawChapters : [])
-    .filter((entry): entry is AtsumaruChapter => Boolean(entry) && typeof entry === "object")
-    .sort((left, right) =>
-      chapterSortValue(right.number) - chapterSortValue(left.number)
-      || (right.index ?? 0) - (left.index ?? 0)
-      || (right.createdAt ?? 0) - (left.createdAt ?? 0));
-  const latest = chapters[0];
+  // Only the highest chapter is needed; avoid copying and sorting the full feed.
+  let latest: AtsumaruChapter | undefined;
+  for (const entry of Array.isArray(rawChapters) ? rawChapters : []) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const chapter = entry as AtsumaruChapter;
+    if (!latest || (
+      chapterSortValue(chapter.number) - chapterSortValue(latest.number)
+      || (chapter.index ?? 0) - (latest.index ?? 0)
+      || (chapter.createdAt ?? 0) - (latest.createdAt ?? 0)
+    ) > 0) {
+      latest = chapter;
+    }
+  }
   if (!latest) {
     return providerNoMatch("atsu", { message: "Atsumaru title contained no chapters" });
   }
@@ -232,4 +241,5 @@ export const ATSUMARU_ADAPTER: ProviderAdapter = {
   },
   buildSearchRequest: buildAtsumaruSearchRequest,
   parseSearchResponse: parseAtsumaruSearchResponse,
+  buildManualSearchUrl: buildAtsumaruManualSearchUrl,
 };

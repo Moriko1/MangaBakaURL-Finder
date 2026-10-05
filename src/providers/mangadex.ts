@@ -6,10 +6,12 @@ import type {
   ProviderSearchRequest,
 } from "./types";
 import { providerFound, providerInvalidResponse, providerNoMatch } from "./types";
+import { buildMangaDexManualSearchUrl } from "./manual-search";
 import { canonicalHttpsUrl, dedupeStrings, getPathSegments, parseHttpUrl } from "./url";
 
 const MANGADEX_HOSTNAMES = new Set(["mangadex.org", "www.mangadex.org"]);
 const MANGADEX_API_HOSTNAME = "api.mangadex.org";
+const MANGADEX_CONTENT_RATINGS = ["safe", "suggestive", "erotica", "pornographic"];
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 interface MangaDexLocalizedStrings {
@@ -83,8 +85,10 @@ export function buildMangaDexSearchRequest(title: string, limit = 10): ProviderS
     title: title.trim(),
     limit: Math.min(100, Math.max(1, limit)).toString(),
     "order[relevance]": "desc",
-    "includes[]": "cover_art",
   });
+  for (const contentRating of MANGADEX_CONTENT_RATINGS) {
+    searchParams.append("contentRating[]", contentRating);
+  }
   return {
     url: `https://${MANGADEX_API_HOSTNAME}/manga?${searchParams.toString()}`,
     credentialPolicy: "omit",
@@ -256,6 +260,10 @@ export function buildMangaDexChapterFeedRequest(
     "order[chapter]": "desc",
     "order[publishAt]": "desc",
   });
+  // Omit the tri-state external URL filter to retain hosted and external chapters.
+  for (const contentRating of MANGADEX_CONTENT_RATINGS) {
+    searchParams.append("contentRating[]", contentRating);
+  }
   return {
     url: `https://${MANGADEX_API_HOSTNAME}/manga/${encodeURIComponent(mangaId)}/feed?${searchParams.toString()}`,
     credentialPolicy: "omit",
@@ -335,8 +343,12 @@ export function classifyMangaDexChapterAvailability(
   englishFeed: MangaDexChapterFeed,
   metadata: MangaDexTitleMetadata,
 ): MangaDexChapterAvailability {
-  const latestChapterNumber = pickHighestMangaDexChapterNumber(englishFeed.chapters);
-  if (latestChapterNumber) {
+  const englishChapters = englishFeed.chapters.filter(
+    (chapter) => chapter.translatedLanguage?.toLowerCase() === "en",
+  );
+  const latestChapterNumber = pickHighestMangaDexChapterNumber(englishChapters);
+  // One-shots and named chapters are available even when no numeric label exists.
+  if (englishChapters.length > 0) {
     return {
       state: "available",
       latestChapterNumber,
@@ -369,7 +381,5 @@ export const MANGADEX_ADAPTER: ProviderAdapter = {
   },
   buildSearchRequest: buildMangaDexSearchRequest,
   parseSearchResponse: parseMangaDexSearchResponse,
-  buildManualSearchUrl(title: string): string {
-    return `https://mangadex.org/search?q=${encodeURIComponent(title.trim())}`;
-  },
+  buildManualSearchUrl: buildMangaDexManualSearchUrl,
 };

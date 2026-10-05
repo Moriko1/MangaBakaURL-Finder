@@ -64,6 +64,11 @@ export interface RuntimeConnectEvent {
 export interface ContentBridgeRuntime {
   onMessage: RuntimeMessageEvent;
   onConnect: RuntimeConnectEvent;
+  sendMessage?(message: {
+    protocolVersion: 1;
+    type: "action:sync";
+    url: string;
+  }): Promise<unknown> | void;
 }
 
 export interface MangaBakaContentBridgeOptions {
@@ -108,15 +113,6 @@ function cloneContext(context: MangaBakaSeriesPageContext | null): MangaBakaSeri
   return context ? { ...context } : null;
 }
 
-function isDisconnectedPortError(error: unknown): boolean {
-  const message = error instanceof Error
-    ? error.message
-    : typeof error === "string"
-      ? error
-      : "";
-  return /disconnected port|port[^.]*disconnected|receiving end does not exist/i.test(message);
-}
-
 function invalidRequestResponse(message: Record<string, unknown> & { type: string }): InvalidBridgeRequestResponse {
   return {
     protocolVersion: MANGABAKA_BRIDGE_PROTOCOL_VERSION,
@@ -143,17 +139,24 @@ class MangaBakaContentBridge implements MangaBakaContentBridgeController {
   private readonly onElementReady = (event: Event): void => {
     const detail = (event as CustomEvent<unknown>).detail;
     const context = sanitizeElementReadyContext(detail, this.documentNode, this.observedAt());
-    if (context) {
-      this.updateContext(context);
+    if (context && this.updateContext(context)) {
+      this.requestActionSync();
     }
   };
 
   private readonly onPageReady = (): void => {
     this.refreshFromDocument("page-ready");
+    this.requestActionSync();
   };
 
   private readonly onDomReady = (): void => {
     this.refreshFromDocument("dom-ready");
+    this.requestActionSync();
+  };
+
+  private readonly onPageShow = (): void => {
+    this.refreshFromDocument("dom-ready");
+    this.requestActionSync();
   };
 
   private readonly onMessage: RuntimeMessageListener = (message, _sender, sendResponse) => {
@@ -177,7 +180,15 @@ class MangaBakaContentBridge implements MangaBakaContentBridgeController {
       return false;
     }
 
-    void this.handleSetReadLink(request).then(sendResponse);
+    void this.handleSetReadLink(request)
+      .then((response) => {
+        try {
+          sendResponse(response);
+        } catch {
+          // The popup may have closed before the asynchronous response was ready.
+        }
+      })
+      .catch(() => undefined);
     return true;
   };
 
@@ -227,6 +238,13 @@ class MangaBakaContentBridge implements MangaBakaContentBridgeController {
     this.documentNode.addEventListener(MANGABAKA_PAGE_READY_EVENT, this.onPageReady);
     this.runtime.onMessage.addListener(this.onMessage);
     this.runtime.onConnect.addListener(this.onConnect);
+    this.documentNode.defaultView?.addEventListener("pageshow", this.onPageShow);
+
+    // A document_start message gives the worker an immediate opportunity to
+    // restore the per-tab icon after Chrome resets action properties during a
+    // navigation. Later readiness and pageshow messages converge the state
+    // again after SPA renders and back/forward-cache restoration.
+    this.requestActionSync();
 
     if (this.documentNode.readyState === "loading") {
       this.documentNode.addEventListener("DOMContentLoaded", this.onDomReady, { once: true });
@@ -264,6 +282,7 @@ class MangaBakaContentBridge implements MangaBakaContentBridgeController {
     this.documentNode.removeEventListener(MANGABAKA_ELEMENT_READY_EVENT, this.onElementReady);
     this.documentNode.removeEventListener(MANGABAKA_PAGE_READY_EVENT, this.onPageReady);
     this.documentNode.removeEventListener("DOMContentLoaded", this.onDomReady);
+    this.documentNode.defaultView?.removeEventListener("pageshow", this.onPageShow);
     this.runtime.onMessage.removeListener(this.onMessage);
     this.runtime.onConnect.removeListener(this.onConnect);
     for (const port of [...this.ports.keys()]) {
@@ -276,16 +295,35 @@ class MangaBakaContentBridge implements MangaBakaContentBridgeController {
     return this.now().toISOString();
   }
 
-  private updateContext(nextContext: MangaBakaSeriesPageContext): void {
+  private requestActionSync(): void {
+    if (this.disposed || !this.runtime.sendMessage) {
+      return;
+    }
+
+    try {
+      const result = this.runtime.sendMessage({
+        protocolVersion: 1,
+        type: "action:sync",
+        url: this.documentNode.location.href,
+      });
+      void Promise.resolve(result).catch(() => undefined);
+    } catch {
+      // Extension reloads invalidate old content-script runtimes. Icon repair
+      // is best-effort and must never leak an error into the host page.
+    }
+  }
+
+  private updateContext(nextContext: MangaBakaSeriesPageContext): boolean {
     if (
       this.context &&
       contextIdentity(this.context) === contextIdentity(nextContext) &&
       READINESS_RANK[this.context.readiness] >= READINESS_RANK[nextContext.readiness]
     ) {
-      return;
+      return false;
     }
     this.context = nextContext;
     this.broadcastContextSnapshot();
+    return true;
   }
 
   private async handleSetReadLink(request: SetReadLinkRequest): Promise<SetReadLinkResponse> {
@@ -348,6 +386,22 @@ class MangaBakaContentBridge implements MangaBakaContentBridgeController {
 
     try {
       const result = await this.setReadLink(this.documentNode, request.url);
+      if (result.ok) {
+        const currentPage = parseMangaBakaSeriesUrl(this.documentNode.location.href);
+        if (!currentPage || currentPage.seriesId !== request.seriesId) {
+          return {
+            protocolVersion: MANGABAKA_BRIDGE_PROTOCOL_VERSION,
+            requestType: SET_READ_LINK,
+            requestId: request.requestId,
+            seriesId: request.seriesId,
+            ok: false,
+            error: {
+              code: "series_mismatch",
+              message: "The active MangaBaka series no longer matches this Read Link request.",
+            },
+          };
+        }
+      }
       return result.ok
         ? {
             protocolVersion: MANGABAKA_BRIDGE_PROTOCOL_VERSION,
@@ -406,10 +460,7 @@ class MangaBakaContentBridge implements MangaBakaContentBridgeController {
     try {
       port.postMessage(message);
       return true;
-    } catch (error) {
-      if (!isDisconnectedPortError(error)) {
-        throw error;
-      }
+    } catch {
       this.disconnectPort(port);
       return false;
     }
@@ -426,9 +477,17 @@ class MangaBakaContentBridge implements MangaBakaContentBridgeController {
     if (!listeners) {
       return;
     }
-    port.onMessage.removeListener(listeners.onMessage);
-    port.onDisconnect.removeListener(listeners.onDisconnect);
     this.ports.delete(port);
+    try {
+      port.onMessage.removeListener(listeners.onMessage);
+    } catch {
+      // The extension context may already be invalidated; the port is still dropped locally.
+    }
+    try {
+      port.onDisconnect.removeListener(listeners.onDisconnect);
+    } catch {
+      // Listener cleanup is best-effort after a browser-managed disconnect.
+    }
   }
 }
 

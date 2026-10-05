@@ -8,6 +8,7 @@ import type {
 } from "./types";
 import { providerFound, providerNoMatch } from "./types";
 import { extractHtmlAnchors } from "./html";
+import { buildAdultManualSearchUrl } from "./manual-search";
 import { canonicalHttpsUrl, dedupeStrings, getPathSegments, parseHttpUrl } from "./url";
 
 type AdultProviderId = Extract<ProviderId, "ehentai" | "exhentai">;
@@ -71,10 +72,8 @@ export function buildAdultProviderSearchRequest(
   providerId: AdultProviderId,
   title: string,
 ): ProviderSearchRequest {
-  const config = configFor(providerId);
-  const params = new URLSearchParams({ f_search: title.trim() });
   return {
-    url: `https://${config.hostname}/?${params.toString()}`,
+    url: buildAdultManualSearchUrl(providerId, title),
     credentialPolicy: providerId === "exhentai" ? "include" : "omit",
     headers: { accept: "text/html" },
     forbiddenOutcome: providerId === "exhentai" ? "auth_required" : "blocked",
@@ -156,7 +155,7 @@ function createAdultProviderAdapter(providerId: AdultProviderId): ProviderAdapte
     },
     buildSearchRequest: (title) => buildAdultProviderSearchRequest(providerId, title),
     parseSearchResponse: (body) => parseAdultProviderSearchResponse(providerId, body),
-    buildManualSearchUrl: (title) => buildAdultProviderSearchRequest(providerId, title).url,
+    buildManualSearchUrl: (title) => buildAdultManualSearchUrl(providerId, title),
   };
 }
 

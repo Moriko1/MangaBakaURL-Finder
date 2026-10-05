@@ -17,7 +17,9 @@ Firefox: Link TBD
 #### Additional features:
 - Optionally save URL into your MangaBaka Library's `Read Link` field
 - Caches lookup results locally for faster repeat use
-- Extension search and page logic only runs while the popup window is open
+- Series matching runs while the popup window is open
+- Search selected text through the right-click context menu, with MangaBaka-only or MangaBaka plus enabled-provider options
+- Configure context-menu searches to open in the current tab or a new tab, or disable the menu
 
 ## Supported Providers
 

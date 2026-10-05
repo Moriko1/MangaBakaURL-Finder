@@ -4,6 +4,7 @@ export const RELEASE_UPDATE_ALARM_NAME = "extension:release-update-check";
 
 const GITHUB_RELEASES_LATEST_PAGE_URL = "https://github.com/Moriko1/MangaBakaURL-Finder/releases/latest";
 const GITHUB_RELEASES_LATEST_API_URL = "https://api.github.com/repos/Moriko1/MangaBakaURL-Finder/releases/latest";
+const DEFAULT_RELEASE_UPDATE_API_TIMEOUT_MS = 10_000;
 
 export interface ReleaseUpdateRecord {
   checkedAt: string;
@@ -37,6 +38,7 @@ interface ReleaseUpdateControllerOptions {
   tabs: Pick<typeof chrome.tabs, "create" | "get" | "query" | "remove" | "onRemoved" | "onUpdated">;
   fetchImpl?: typeof fetch;
   now?: () => Date;
+  apiTimeoutMs?: number;
 }
 
 export interface ReleaseUpdateController {
@@ -111,8 +113,8 @@ export function isLatestReleaseCheckDue(
   const lastScheduledTime = getLastScheduledReleaseUpdateTime(reference);
   if (record?.currentVersion === currentVersion) {
     const checkedAt = Date.parse(record.checkedAt);
-    if (Number.isFinite(checkedAt)) {
-      return checkedAt < lastScheduledTime;
+    if (Number.isFinite(checkedAt) && checkedAt >= lastScheduledTime) {
+      return false;
     }
   }
 
@@ -161,6 +163,12 @@ export function createReleaseUpdateController(options: ReleaseUpdateControllerOp
   const { alarms, currentVersion: manifestVersion, storage, tabs, versionName } = options;
   const fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
   const now = options.now ?? (() => new Date());
+  const configuredApiTimeoutMs = options.apiTimeoutMs;
+  const apiTimeoutMs = typeof configuredApiTimeoutMs === "number"
+    && Number.isFinite(configuredApiTimeoutMs)
+    && configuredApiTimeoutMs > 0
+    ? configuredApiTimeoutMs
+    : DEFAULT_RELEASE_UPDATE_API_TIMEOUT_MS;
   const currentVersion = normalizeVersion(manifestVersion) ?? manifestVersion;
   let syncPromise: Promise<void> | null = null;
   let pendingForcedSync = false;
@@ -219,22 +227,39 @@ export function createReleaseUpdateController(options: ReleaseUpdateControllerOp
   }
 
   async function fetchLatestReleaseFromApi(): Promise<LatestReleaseResolution> {
-    const response = await fetchImpl(GITHUB_RELEASES_LATEST_API_URL, {
-      headers: {
-        Accept: "application/vnd.github+json",
-      },
+    const controller = new AbortController();
+    let timeoutId = 0;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timeoutId = globalThis.setTimeout(() => {
+        controller.abort();
+        reject(new Error(`GitHub latest release API request timed out after ${apiTimeoutMs} ms.`));
+      }, apiTimeoutMs);
     });
-    if (!response.ok) {
-      throw new Error(`GitHub latest release request failed with status ${response.status}.`);
-    }
+    const request = (async (): Promise<LatestReleaseResolution> => {
+      const response = await fetchImpl(GITHUB_RELEASES_LATEST_API_URL, {
+        headers: {
+          Accept: "application/vnd.github+json",
+        },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error(`GitHub latest release request failed with status ${response.status}.`);
+      }
 
-    const payload = await response.json() as GitHubLatestReleaseResponse;
-    return {
-      latestTagName: typeof payload.tag_name === "string" && payload.tag_name.trim() ? payload.tag_name.trim() : null,
-      latestReleaseUrl: typeof payload.html_url === "string" && payload.html_url.trim()
-        ? payload.html_url.trim()
-        : GITHUB_RELEASES_LATEST_PAGE_URL,
-    };
+      const payload = await response.json() as GitHubLatestReleaseResponse;
+      return {
+        latestTagName: typeof payload.tag_name === "string" && payload.tag_name.trim() ? payload.tag_name.trim() : null,
+        latestReleaseUrl: typeof payload.html_url === "string" && payload.html_url.trim()
+          ? payload.html_url.trim()
+          : GITHUB_RELEASES_LATEST_PAGE_URL,
+      };
+    })();
+
+    try {
+      return await Promise.race([request, timeout]);
+    } finally {
+      globalThis.clearTimeout(timeoutId);
+    }
   }
 
   async function waitForTabToFinishLoading(tabId: number, timeoutMs = 15000): Promise<{ url?: string; status?: string }> {
@@ -316,13 +341,13 @@ export function createReleaseUpdateController(options: ReleaseUpdateControllerOp
   }
 
   async function fetchAndStoreLatestReleaseUpdate(checkedAt: string): Promise<void> {
-    let latestRelease: LatestReleaseResolution;
+    let latestRelease: LatestReleaseResolution | null = null;
     try {
       latestRelease = await fetchLatestReleaseFromApi();
-      if (!latestRelease.latestTagName) {
-        latestRelease = await resolveLatestReleaseViaTab();
-      }
     } catch {
+      // Resolve via one bounded tab attempt if the API is unavailable.
+    }
+    if (!latestRelease?.latestTagName) {
       latestRelease = await resolveLatestReleaseViaTab();
     }
 
@@ -347,7 +372,7 @@ export function createReleaseUpdateController(options: ReleaseUpdateControllerOp
       return syncPromise;
     }
 
-    syncPromise = (async () => {
+    const drainPromise = (async () => {
       do {
         const runForceCheck = pendingForcedSync;
         pendingForcedSync = false;
@@ -370,8 +395,12 @@ export function createReleaseUpdateController(options: ReleaseUpdateControllerOp
 
         await scheduleNextReleaseUpdateCheck();
       } while (pendingForcedSync);
-    })().finally(() => {
+    })();
+    syncPromise = drainPromise.finally(async () => {
       syncPromise = null;
+      if (pendingForcedSync) {
+        await syncSchedule();
+      }
     });
 
     return syncPromise;
@@ -383,8 +412,9 @@ export function createReleaseUpdateController(options: ReleaseUpdateControllerOp
       return;
     }
 
-    const record = await loadReleaseUpdateRecord();
-    await syncSchedule(record?.currentVersion !== currentVersion);
+    // The scheduler also considers failed attempts, including before the first
+    // successful check. Opening the popup must not bypass that retry boundary.
+    await syncSchedule();
   }
 
   return { ensureStatus, syncSchedule };

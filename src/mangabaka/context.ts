@@ -6,6 +6,7 @@ import {
 import { isMangaMediaType, MangaMediaType } from "../domain/media";
 import { cleanTitleText } from "../domain/titles";
 import {
+  getMangaBakaSeriesRootUrl,
   parseMangaBakaSeriesUrl,
   validateCanonicalMangaBakaSeriesUrl,
 } from "./url";
@@ -142,7 +143,7 @@ function getDocumentIdentity(documentNode: Document): ContextIdentity | null {
   return {
     seriesId: currentLocation.seriesId,
     mediaType: currentLocation.mediaType,
-    canonicalUrl: currentLocation.mediaType ? currentUrl : null,
+    canonicalUrl: currentLocation.mediaType ? getMangaBakaSeriesRootUrl(currentUrl) : null,
   };
 }
 

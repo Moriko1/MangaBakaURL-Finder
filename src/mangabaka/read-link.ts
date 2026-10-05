@@ -31,6 +31,10 @@ const EDITOR_OPEN_INTERVAL_MS = 125;
 const MAX_EDITOR_CANDIDATES = 2;
 const SUBMISSION_CONFIRM_ATTEMPTS = 32;
 const SUBMISSION_CONFIRM_INTERVAL_MS = 125;
+const ADD_TO_LIBRARY_LABELS = new Set([
+  "add series to my library", "add to my library", "add series to your library", "add to library",
+]);
+const SAVE_LABELS = new Set(["update series", "save", "save changes"]);
 
 function failure(code: MangaBakaBridgeErrorCode, message: string): SetReadLinkResult {
   return { ok: false, error: { code, message } };
@@ -82,6 +86,14 @@ function isSubmitElement(element: Element | null): element is HTMLButtonElement 
   return Boolean(element && (element.tagName === "BUTTON" || element.tagName === "INPUT"));
 }
 
+function isEnabled(element: HTMLElement): boolean {
+  return !element.matches(":disabled, [aria-disabled='true']");
+}
+
+function isWritableReadLinkControl(element: HTMLInputElement | HTMLTextAreaElement): boolean {
+  return isVisible(element) && isEnabled(element) && !element.readOnly && element.type !== "hidden";
+}
+
 function isVisible(element: Element | null): element is HTMLElement {
   if (!isHtmlElement(element)) {
     return false;
@@ -115,7 +127,7 @@ function isVisible(element: Element | null): element is HTMLElement {
 function findReadLinkInput(documentNode: Document): HTMLInputElement | HTMLTextAreaElement | null {
   const direct = Array.from(
     documentNode.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(READ_LINK_INPUT_SELECTOR),
-  ).find(isVisible);
+  ).find(isWritableReadLinkControl);
   if (direct) {
     return direct;
   }
@@ -126,13 +138,13 @@ function findReadLinkInput(documentNode: Document): HTMLInputElement | HTMLTextA
   for (const label of labels) {
     if (label.htmlFor) {
       const labeled = documentNode.getElementById(label.htmlFor);
-      if (isReadLinkControl(labeled) && isVisible(labeled)) {
+      if (isReadLinkControl(labeled) && isWritableReadLinkControl(labeled)) {
         return labeled;
       }
     }
 
     const nested = label.querySelector<HTMLInputElement | HTMLTextAreaElement>("input, textarea");
-    if (nested && isVisible(nested)) {
+    if (nested && isWritableReadLinkControl(nested)) {
       return nested;
     }
   }
@@ -141,15 +153,14 @@ function findReadLinkInput(documentNode: Document): HTMLInputElement | HTMLTextA
 }
 
 function findAddToLibraryButton(documentNode: Document): HTMLElement | null {
-  return Array.from(documentNode.querySelectorAll("button, a, [role='button']"))
-    .filter(isVisible)
+  return Array.from(documentNode.querySelectorAll<HTMLElement>("button, a, [role='button']"))
     .find((element) => {
       const labels = [
         element.textContent ?? "",
         element.getAttribute("aria-label") ?? "",
         element.getAttribute("title") ?? "",
       ].map(normalizeFieldText);
-      return labels.includes("add series to my library") || labels.includes("add to my library");
+      return labels.some((label) => ADD_TO_LIBRARY_LABELS.has(label)) && isVisible(element);
     }) ?? null;
 }
 
@@ -194,8 +205,7 @@ function scoreEditorTrigger(element: HTMLElement, libraryScopes: readonly HTMLEl
   const isExactEditorControl = labels.includes("edit library entry");
 
   if (
-    labels.includes("add to my library")
-    || labels.includes("add series to my library")
+    labels.some((label) => ADD_TO_LIBRARY_LABELS.has(label))
     || identity.includes("report")
     || identity.includes("remove")
     || identity.includes("delete")
@@ -215,23 +225,27 @@ function scoreEditorTrigger(element: HTMLElement, libraryScopes: readonly HTMLEl
 async function openSeriesEditor(
   documentNode: Document,
   sleep: (milliseconds: number) => Promise<void>,
+  isCurrentSeries: () => boolean,
 ): Promise<boolean> {
   const libraryScopes = findMyLibraryScopes(documentNode);
   const candidates = Array.from(documentNode.querySelectorAll<HTMLElement>(SERIES_EDITOR_CANDIDATE_SELECTOR))
-    .filter(isVisible)
     .map((element, order) => ({ element, order, score: scoreEditorTrigger(element, libraryScopes) }))
-    .filter(({ score }) => score > 0)
+    .filter(({ element, score }) => score > 0 && isVisible(element) && isEnabled(element))
     .sort((left, right) => right.score - left.score || left.order - right.order)
     .slice(0, MAX_EDITOR_CANDIDATES);
 
   let openedCandidate = false;
   const attemptsPerCandidate = Math.max(1, Math.floor(EDITOR_OPEN_ATTEMPTS / Math.max(1, candidates.length)));
   for (const { element } of candidates) {
+    if (!isCurrentSeries()) return false;
+    if (!isVisible(element) || !isEnabled(element)) continue;
     openedCandidate = true;
     element.focus();
     element.click();
+    if (isCurrentSeries() && findReadLinkInput(documentNode)) return true;
     for (let attempt = 0; attempt < attemptsPerCandidate; attempt += 1) {
       await sleep(EDITOR_OPEN_INTERVAL_MS);
+      if (!isCurrentSeries()) return false;
       if (findReadLinkInput(documentNode)) {
         return true;
       }
@@ -254,28 +268,23 @@ function hasVisibleSubmissionError(container: HTMLElement): boolean {
 }
 
 async function confirmSubmission(
-  input: HTMLInputElement | HTMLTextAreaElement,
-  editorContainer: HTMLElement | null,
+  container: HTMLElement,
   sleep: (milliseconds: number) => Promise<void>,
+  isCurrentSeries: () => boolean,
 ): Promise<boolean> {
-  if (!editorContainer) {
-    await sleep(250);
-    return true;
-  }
-
-  for (let attempt = 0; attempt < SUBMISSION_CONFIRM_ATTEMPTS; attempt += 1) {
-    await sleep(SUBMISSION_CONFIRM_INTERVAL_MS);
+  for (let attempt = 0; attempt <= SUBMISSION_CONFIRM_ATTEMPTS; attempt += 1) {
+    if (!isCurrentSeries()) return false;
     if (
-      !input.isConnected
-      || !editorContainer.isConnected
-      || editorContainer.getAttribute("data-state") === "closed"
-      || !isVisible(editorContainer)
+      !container.isConnected
+      || container.getAttribute("data-state") === "closed"
+      || !isVisible(container)
     ) {
       return true;
     }
-    if (hasVisibleSubmissionError(editorContainer)) {
+    if (hasVisibleSubmissionError(container)) {
       return false;
     }
+    if (attempt < SUBMISSION_CONFIRM_ATTEMPTS) await sleep(SUBMISSION_CONFIRM_INTERVAL_MS);
   }
 
   return false;
@@ -294,18 +303,23 @@ function setControlledInputValue(input: HTMLInputElement | HTMLTextAreaElement, 
   input.dispatchEvent(new EventConstructor("change", { bubbles: true }));
 }
 
-function findSubmitControl(input: HTMLInputElement | HTMLTextAreaElement): HTMLElement | null {
-  const container =
-    input.closest("form, [role='dialog'], [data-slot='sheet-content'], [data-slot='drawer-content']") ??
-    input.ownerDocument.body;
-  return Array.from(container.querySelectorAll<HTMLElement>("button, input[type='submit'], [data-slot='button']"))
+function findSubmitControl(input: HTMLInputElement | HTMLTextAreaElement, allowDisabled = false): HTMLElement | null {
+  const form = input.form;
+  const container = form ?? findEditorContainer(input);
+  if (!container) return null;
+  const controls = form
+    ? Array.from(form.elements).filter(isHtmlElement)
+    : Array.from(container.querySelectorAll<HTMLElement>("button, input[type='submit'], [role='button']"));
+  return controls
     .filter(isVisible)
+    .filter((element) => allowDisabled || isEnabled(element))
     .find((element) => {
-      if (isSubmitElement(element) && element.type === "submit") {
-        return true;
-      }
-      const text = getElementText(element);
-      return text === "update series" || text === "save";
+      if (isSubmitElement(element) && element.type === "reset") return false;
+      if (isSubmitElement(element) && element.form !== form) return false;
+      if (!element.matches("button, input[type='submit'], [role='button']")) return false;
+      const labels = getEditorTriggerLabels(element);
+      if (element.tagName === "INPUT") labels.push(normalizeFieldText((element as HTMLInputElement).value));
+      return labels.some((label) => SAVE_LABELS.has(label));
     }) ?? null;
 }
 
@@ -314,7 +328,8 @@ export async function setMangaBakaReadLink(
   value: string,
   options: SetReadLinkOptions = {},
 ): Promise<SetReadLinkResult> {
-  if (!parseMangaBakaSeriesUrl(documentNode.location.href)) {
+  const series = parseMangaBakaSeriesUrl(documentNode.location.href);
+  if (!series) {
     return failure("unsupported_page", "Read Link can only be changed on a MangaBaka series page.");
   }
 
@@ -326,6 +341,7 @@ export async function setMangaBakaReadLink(
   const sleep = options.sleep ?? ((milliseconds: number) => new Promise<void>((resolve) => {
     documentNode.defaultView?.setTimeout(resolve, milliseconds);
   }));
+  const isCurrentSeries = () => parseMangaBakaSeriesUrl(documentNode.location.href)?.seriesId === series.seriesId;
 
   let input = findReadLinkInput(documentNode);
   if (!input) {
@@ -333,7 +349,11 @@ export async function setMangaBakaReadLink(
       return failure("not_in_library", "Add this series to your MangaBaka library before saving a Read Link.");
     }
 
-    if (!(await openSeriesEditor(documentNode, sleep))) {
+    const opened = await openSeriesEditor(documentNode, sleep, isCurrentSeries);
+    if (!isCurrentSeries()) {
+      return failure("series_mismatch", "The MangaBaka series changed before the Read Link could be saved.");
+    }
+    if (!opened) {
       return failure("editor_unavailable", "Could not open the MangaBaka library editor.");
     }
     input = findReadLinkInput(documentNode);
@@ -343,31 +363,38 @@ export async function setMangaBakaReadLink(
     return failure("field_unavailable", "Could not find the MangaBaka Read Link field.");
   }
 
+  const form = input.form;
+  const editorContainer = findEditorContainer(input) ?? form;
+  if (!findSubmitControl(input, true) || !editorContainer) {
+    return failure("submit_unavailable", "Could not find a control for saving the MangaBaka Read Link.");
+  }
+
   setControlledInputValue(input, readLinkUrl);
+  // Let the site's reactive form apply validation and enable its save action.
+  await Promise.resolve();
+  if (!isCurrentSeries()) {
+    return failure("series_mismatch", "The MangaBaka series changed before the Read Link could be saved.");
+  }
   if (input.value !== readLinkUrl) {
     return failure("submission_failed", "MangaBaka did not accept the Read Link value.");
   }
 
   const submitControl = findSubmitControl(input);
-  const form = input.form ?? input.closest("form");
-  const editorContainer = findEditorContainer(input);
+  if (!isWritableReadLinkControl(input) || !submitControl) {
+    return failure("submit_unavailable", "The MangaBaka editor changed before the Read Link could be saved.");
+  }
   try {
-    if (isFormElement(form) && typeof form.requestSubmit === "function") {
-      if (isSubmitElement(submitControl)) {
-        form.requestSubmit(submitControl);
-      } else {
-        form.requestSubmit();
-      }
-    } else if (submitControl) {
-      submitControl.click();
+    if (isFormElement(form) && typeof form.requestSubmit === "function"
+      && isSubmitElement(submitControl) && submitControl.type === "submit") {
+      form.requestSubmit(submitControl);
     } else {
-      return failure("submit_unavailable", "Could not find a control for saving the MangaBaka Read Link.");
+      submitControl.click();
     }
   } catch {
     return failure("submission_failed", "MangaBaka rejected the Read Link update.");
   }
 
-  if (!(await confirmSubmission(input, editorContainer, sleep))) {
+  if (!(await confirmSubmission(editorContainer, sleep, isCurrentSeries))) {
     return failure("submission_failed", "MangaBaka did not confirm the Read Link update.");
   }
   return { ok: true, url: readLinkUrl };

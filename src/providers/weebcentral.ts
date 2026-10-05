@@ -7,6 +7,7 @@ import type {
 } from "./types";
 import { providerFound, providerNoMatch } from "./types";
 import { extractHtmlAnchors } from "./html";
+import { buildWeebCentralManualSearchUrl } from "./manual-search";
 import { canonicalHttpsUrl, dedupeStrings, getPathSegments, parseHttpUrl, slugToTitle } from "./url";
 
 const WEEBCENTRAL_HOSTNAMES = new Set(["weebcentral.com", "www.weebcentral.com"]);
@@ -120,7 +121,5 @@ export const WEEBCENTRAL_ADAPTER: ProviderAdapter = {
   },
   buildSearchRequest: buildWeebCentralSearchRequest,
   parseSearchResponse: parseWeebCentralSearchResponse,
-  buildManualSearchUrl(title: string): string {
-    return `https://weebcentral.com/search?text=${encodeURIComponent(title.trim())}`;
-  },
+  buildManualSearchUrl: buildWeebCentralManualSearchUrl,
 };

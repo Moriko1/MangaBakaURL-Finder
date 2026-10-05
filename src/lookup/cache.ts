@@ -8,6 +8,7 @@ declare const __ADULT_PROVIDERS_ENABLED__: boolean;
 export const LOOKUP_CACHE_SCHEMA_VERSION = 12 as const;
 export const LOOKUP_CACHE_SCHEMA_KEY = "extension:lookup-cache-schema";
 export const LOOKUP_CACHE_PREFIX = "lookup:v12:";
+export const MANGADEX_LOOKUP_REVISION = 1;
 
 export interface CachedMangaBakaSeries {
   requestedSeriesId: number;
@@ -22,6 +23,7 @@ export interface CachedMangaBakaSeries {
 }
 
 export interface CachedProviderState<TMatch = unknown, TOutcome = unknown> {
+  lookupRevision?: number;
   searched: boolean;
   result: TMatch | null;
   outcome: TOutcome | null;
@@ -129,10 +131,11 @@ function isProviderMatchRecord(providerId: ProviderId, value: unknown): value is
   }
 
   if (providerId === "mangadex") {
-    const chapterStates = new Set([undefined, null, "purged", "no_chapters_tld"]);
+    const chapterStates = new Set([undefined, null, "available", "purged", "no_chapters_tld"]);
+    const manualChapterStates = new Set([undefined, null, "purged", "no_chapters_tld"]);
     if (
       !chapterStates.has(value.mangaDexChapterState as undefined | null | string)
-      || !chapterStates.has(value.manualMangaDexChapterState as undefined | null | string)
+      || !manualChapterStates.has(value.manualMangaDexChapterState as undefined | null | string)
       || !(
         value.manualPurgedChapterNumber === undefined
         || value.manualPurgedChapterNumber === null
@@ -170,6 +173,7 @@ function isCachedProviderState(
   }
   if (
     typeof value.searched !== "boolean"
+    || !(value.lookupRevision === undefined || (typeof value.lookupRevision === "number" && Number.isSafeInteger(value.lookupRevision)))
     || !(value.result === null || isRecord(value.result))
     || !Array.isArray(value.rejectedUrls)
     || !value.rejectedUrls.every((url) => isProviderUrl(providerId as ProviderId, url))
@@ -185,7 +189,8 @@ function isCachedProviderState(
     return value.searched === false
       && value.result === null
       && value.titleCursor === 0
-      && value.rejectedUrls.length === 0;
+      && (value.rejectedUrls.length === 0
+        || (providerId === "mangadex" && value.lookupRevision === MANGADEX_LOOKUP_REVISION));
   }
   if (!isRecord(value.outcome) || value.outcome.providerId !== providerId) {
     return false;
@@ -296,4 +301,27 @@ export function shouldInvalidateProviderResults(
   currentTitles: readonly SeriesTitle[],
 ): boolean {
   return cached.titleFingerprint !== createTitleFingerprint(currentTitles);
+}
+
+export function refreshMangaDexCacheRevision<TMatch, TOutcome>(
+  providers: Partial<Record<ProviderId, CachedProviderState<TMatch, TOutcome>>>,
+): Partial<Record<ProviderId, CachedProviderState<TMatch, TOutcome>>> {
+  const mangaDex = providers.mangadex;
+  if (!mangaDex || mangaDex.lookupRevision === MANGADEX_LOOKUP_REVISION) {
+    return providers;
+  }
+
+  // Recheck old matches and chapter states without discarding other providers
+  // or URLs the user explicitly rejected.
+  return {
+    ...providers,
+    mangadex: {
+      lookupRevision: MANGADEX_LOOKUP_REVISION,
+      searched: false,
+      result: null,
+      outcome: null,
+      rejectedUrls: [...mangaDex.rejectedUrls],
+      titleCursor: 0,
+    },
+  };
 }

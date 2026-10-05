@@ -105,7 +105,10 @@ export async function fetchProviderText(options: ProviderFetchTextOptions): Prom
     let body: string;
     try {
       body = await response.text();
-    } catch {
+    } catch (error) {
+      if (timedOut || options.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+        throw error;
+      }
       return { kind: "unavailable", reason: "network", ...base, message: "Provider response body could not be read" };
     }
 
